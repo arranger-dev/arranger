@@ -32,14 +32,20 @@ CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, agent_id TEXT NOT NULL, ts INTEGER NOT NULL,
   kind TEXT NOT NULL, text TEXT NOT NULL, raw TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
+CREATE TABLE IF NOT EXISTS agent_types (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '#3d6fe0', runtime TEXT NOT NULL DEFAULT 'claude',
+  model TEXT NOT NULL DEFAULT '', args TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL);
 `
 
 // migrations add columns to tables created by older versions; "duplicate column" errors are expected.
 var migrations = []string{
-	`ALTER TABLE goals ADD COLUMN base TEXT NOT NULL DEFAULT ''`,  // branch the agent's work is diffed against
-	`ALTER TABLE goals ADD COLUMN notes TEXT NOT NULL DEFAULT ''`, // changes the user removed; the agent must not re-add them
+	`ALTER TABLE goals ADD COLUMN base TEXT NOT NULL DEFAULT ''`,          // branch the agent's work is diffed against
+	`ALTER TABLE goals ADD COLUMN notes TEXT NOT NULL DEFAULT ''`,         // changes the user removed; the agent must not re-add them
+	`ALTER TABLE agents ADD COLUMN token_soft INTEGER NOT NULL DEFAULT 0`, // warn above this many tokens per run; 0 = off
+	`ALTER TABLE agents ADD COLUMN token_hard INTEGER NOT NULL DEFAULT 0`, // stop above this many tokens per run; 0 = off
+	`ALTER TABLE goals ADD COLUMN since INTEGER NOT NULL DEFAULT 0`,       // when the current run started (ms)
 	// a crash mid-run leaves stale statuses behind
 	`UPDATE goals SET status = 'stopped' WHERE status IN ('running', 'verifying', 'planning', 'waiting', 'reviewing')`,
 }
@@ -60,6 +66,19 @@ type Agent struct {
 	Model   string `json:"model"`
 	Prompt  string `json:"prompt"`
 	Args    string `json:"args"`
+	Soft    int    `json:"tokenSoft"`
+	Hard    int    `json:"tokenHard"`
+}
+
+// AgentType is a user-defined palette entry: a role with default settings for new agents.
+type AgentType struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Color   string `json:"color"`
+	Runtime string `json:"runtime"`
+	Model   string `json:"model"`
+	Args    string `json:"args"`
+	Prompt  string `json:"prompt"`
 }
 
 type Goal struct {
@@ -162,10 +181,10 @@ func listProjects() ([]Project, error) {
 	return ps, rows.Err()
 }
 
-const agentCols = `id, name, role, parent, runtime, model, prompt, args`
+const agentCols = `id, name, role, parent, runtime, model, prompt, args, token_soft, token_hard`
 
 func scanAgent(s interface{ Scan(...any) error }) (a Agent, err error) {
-	err = s.Scan(&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args)
+	err = s.Scan(&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &a.Soft, &a.Hard)
 	return
 }
 
@@ -200,13 +219,13 @@ func addDecision(agentID, kind string, v any) {
 
 func getAgent(id string) (a Agent, pid string, err error) {
 	err = db.QueryRow(`SELECT `+agentCols+`, project_id FROM agents WHERE id=?`, id).
-		Scan(&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &pid)
+		Scan(&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &a.Soft, &a.Hard, &pid)
 	return
 }
 
 func updateAgent(a Agent) error {
-	_, err := db.Exec(`UPDATE agents SET name=?, runtime=?, model=?, prompt=?, args=? WHERE id=?`,
-		a.Name, a.Runtime, a.Model, a.Prompt, a.Args, a.ID)
+	_, err := db.Exec(`UPDATE agents SET name=?, runtime=?, model=?, prompt=?, args=?, token_soft=?, token_hard=? WHERE id=?`,
+		a.Name, a.Runtime, a.Model, a.Prompt, a.Args, a.Soft, a.Hard, a.ID)
 	return err
 }
 
@@ -229,9 +248,10 @@ func saveArrangement(projectID string, as []Agent) error {
 		if rt == "" {
 			rt = "claude"
 		}
-		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime) VALUES(?,?,?,?,?,?,?)
+		// settings only apply to new agents (e.g. from a custom type); existing ones keep theirs
+		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt) VALUES(?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, parent=excluded.parent, pos=excluded.pos`,
-			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt); err != nil {
+			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt); err != nil {
 			return err
 		}
 		keep[a.ID] = true
@@ -331,13 +351,24 @@ type Summary struct {
 
 type AgentStatus struct {
 	Goal
-	Now string `json:"now"`
+	Now       string  `json:"now"`
+	Since     int64   `json:"since"`     // current run's start, ms
+	Cost      float64 `json:"cost"`      // this run
+	Tokens    int     `json:"tokens"`    // this run
+	AllCost   float64 `json:"allCost"`   // every run ever
+	AllTokens int     `json:"allTokens"` // every run ever
+	Soft      int     `json:"tokenSoft"`
+	Hard      int     `json:"tokenHard"`
 }
 
 func projectSummary(projectID string) (Summary, error) {
 	s := Summary{Agents: map[string]AgentStatus{}}
 	rows, err := db.Query(`SELECT a.id, coalesce(g.title,''), coalesce(g.status,'idle'), coalesce(g.attempts,0),
-		coalesce(g.passed,0), coalesce(g.total,0), coalesce(g.adds,0), coalesce(g.dels,0)
+		coalesce(g.passed,0), coalesce(g.total,0), coalesce(g.adds,0), coalesce(g.dels,0), coalesce(g.since,0), a.token_soft, a.token_hard,
+		(SELECT coalesce(sum(cost),0) FROM runs r WHERE r.agent_id=a.id AND r.started >= coalesce(g.since,0)),
+		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id AND r.started >= coalesce(g.since,0)),
+		(SELECT coalesce(sum(cost),0) FROM runs r WHERE r.agent_id=a.id),
+		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id)
 		FROM agents a LEFT JOIN goals g ON g.agent_id = a.id WHERE a.project_id=?`, projectID)
 	if err != nil {
 		return s, err
@@ -346,12 +377,48 @@ func projectSummary(projectID string) (Summary, error) {
 	for rows.Next() {
 		var id string
 		var st AgentStatus
-		if err := rows.Scan(&id, &st.Title, &st.Status, &st.Attempts, &st.Passed, &st.Total, &st.Adds, &st.Dels); err != nil {
+		if err := rows.Scan(&id, &st.Title, &st.Status, &st.Attempts, &st.Passed, &st.Total, &st.Adds, &st.Dels, &st.Since,
+			&st.Soft, &st.Hard, &st.Cost, &st.Tokens, &st.AllCost, &st.AllTokens); err != nil {
 			return s, err
 		}
 		st.Now = hub.now(id)
 		s.Agents[id] = st
+		s.Cost += st.AllCost
 	}
-	db.QueryRow(`SELECT coalesce(sum(r.cost),0) FROM runs r JOIN agents a ON a.id = r.agent_id WHERE a.project_id=?`, projectID).Scan(&s.Cost)
 	return s, rows.Err()
+}
+
+func listTypes() ([]AgentType, error) {
+	rows, err := db.Query(`SELECT id, name, color, runtime, model, args, prompt FROM agent_types ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ts := []AgentType{}
+	for rows.Next() {
+		var t AgentType
+		if err := rows.Scan(&t.ID, &t.Name, &t.Color, &t.Runtime, &t.Model, &t.Args, &t.Prompt); err != nil {
+			return nil, err
+		}
+		ts = append(ts, t)
+	}
+	return ts, rows.Err()
+}
+
+// saveType creates the type when t.ID is empty, else updates it.
+func saveType(t *AgentType) error {
+	if t.ID == "" {
+		t.ID = newID("t")
+		_, err := db.Exec(`INSERT INTO agent_types(id, name, color, runtime, model, args, prompt) VALUES(?,?,?,?,?,?,?)`,
+			t.ID, t.Name, t.Color, t.Runtime, t.Model, t.Args, t.Prompt)
+		return err
+	}
+	_, err := db.Exec(`UPDATE agent_types SET name=?, color=?, runtime=?, model=?, args=?, prompt=? WHERE id=?`,
+		t.Name, t.Color, t.Runtime, t.Model, t.Args, t.Prompt, t.ID)
+	return err
+}
+
+func deleteType(id string) error {
+	_, err := db.Exec(`DELETE FROM agent_types WHERE id=?`, id)
+	return err
 }

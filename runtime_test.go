@@ -26,7 +26,7 @@ func TestParseClaude(t *testing.T) {
 	want := []Event{
 		{Kind: "file", Text: "Write a.txt"},
 		{Kind: "msg", Text: "Done."},
-		{Kind: "done", Text: "Done.", Cost: 0.0257562, In: 17 + 10470 + 33842, Out: 283},
+		{Kind: "done", Text: "Done.", Cost: 0.0257562, In: 17 + 10470 + 33842, Out: 283, ID: "total"},
 		{Kind: "error", Text: "Permission denied: Bash"},
 	}
 	if !reflect.DeepEqual(es, want) {
@@ -82,7 +82,7 @@ func TestParseOthers(t *testing.T) {
 			{Kind: "msg", Text: "Creating the file."},
 			{Kind: "file", Text: "write a.txt"},
 			{Kind: "tool", Text: "shell ls"},
-			{Kind: "done", Text: "Created a.txt."},
+			{Kind: "done", Text: "Created a.txt.", ID: "total"},
 		}},
 	}
 	for name, c := range cases {
@@ -112,5 +112,14 @@ func TestCommand(t *testing.T) {
 		if got := strings.Join(cmd.Args[1:], " "); got != "exec --json --full-auto -m o3 --foo -" {
 			t.Errorf("codex args: %s", got)
 		}
+	}
+}
+
+func TestParseClaudeUsage(t *testing.T) {
+	line := `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":5,"cache_read_input_tokens":100,"output_tokens":7}}}`
+	es := parseClaude([]byte(line))
+	want := []Event{{Kind: "msg", Text: "hi"}, {Kind: "usage", ID: "m1", In: 105, Out: 7}}
+	if !reflect.DeepEqual(es, want) {
+		t.Fatalf("got %+v", es)
 	}
 }

@@ -86,7 +86,13 @@ type job struct {
 	p   Project
 	a   Agent
 	run int64 // current runs.id, tags events
+
+	used      int  // tokens this run, across attempts
+	warned    bool // soft limit already reported
+	overLimit bool // hard limit hit; the run must end
 }
+
+var errTokenLimit = errors.New("hard token limit reached")
 
 func (j *job) emit(kind, text, raw string) {
 	e := LogEvent{Agent: j.a.ID, Run: j.run, Kind: kind, Text: text, Raw: raw}
@@ -250,7 +256,7 @@ func execute(j *job, feedback string) string {
 		return j.fail("failed", err.Error())
 	}
 	g.Base = base
-	setGoal(j.a.ID, map[string]any{"attempts": 0, "feedback": "", "passed": 0, "total": 0})
+	setGoal(j.a.ID, map[string]any{"attempts": 0, "feedback": "", "passed": 0, "total": 0, "since": time.Now().UnixMilli()})
 	if len(kids) > 0 {
 		return runManager(j, g, dir, kids, feedback)
 	}
@@ -273,6 +279,9 @@ func runWorker(j *job, g Goal, dir, feedback string) string {
 		refreshDiff(j.a.ID, dir, g.Base)
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
+		}
+		if errors.Is(agentErr, errTokenLimit) {
+			return j.fail("failed", j.limitMsg())
 		}
 		if agentErr != nil {
 			j.emit("error", agentErr.Error(), "")
@@ -327,6 +336,9 @@ func runManager(j *job, g Goal, dir string, kids []Agent, feedback string) strin
 	if j.ctx.Err() != nil {
 		return j.fail("stopped", "stopped by user")
 	}
+	if errors.Is(err, errTokenLimit) {
+		return j.fail("failed", j.limitMsg())
+	}
 	if err != nil {
 		return j.fail("failed", "no valid plan: "+err.Error())
 	}
@@ -366,6 +378,9 @@ func runManager(j *job, g Goal, dir string, kids []Agent, feedback string) strin
 		verdicts, err := j.review(g, dir, done)
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
+		}
+		if errors.Is(err, errTokenLimit) {
+			return j.fail("failed", j.limitMsg())
 		}
 		if err != nil {
 			return j.fail("blocked", "needs you: review failed: "+err.Error())
@@ -448,7 +463,7 @@ func (j *job) decide(prompt, dir string, v any, valid func() error) error {
 		if err == nil {
 			err = valid()
 		}
-		if err == nil || j.ctx.Err() != nil || try == maxPlanTries {
+		if err == nil || j.ctx.Err() != nil || errors.Is(err, errTokenLimit) || try == maxPlanTries {
 			return err
 		}
 		j.emit("error", "reply rejected: "+err.Error(), "")
@@ -523,6 +538,29 @@ func extractJSON(s string, v any) error {
 	return json.Unmarshal([]byte(s[i:k+1]), v)
 }
 
+func (j *job) limitMsg() string {
+	return fmt.Sprintf("stopped: used %d tokens, over this agent's hard limit of %d. Raise it in Settings or narrow the goal.", j.used, j.a.Hard)
+}
+
+// account adds token usage to the run, updates the UI live, and enforces the agent's limits.
+// It returns false once the hard limit is hit.
+func (j *job) account(in, out int, cost float64) bool {
+	j.used += in + out
+	hub.publish(j.p.ID, map[string]any{"type": "usage", "agent": j.a.ID})
+	if j.a.Hard > 0 && j.used >= j.a.Hard {
+		if !j.overLimit {
+			j.overLimit = true
+			j.emit("error", fmt.Sprintf("hard token limit: %d of %d tokens used, stopping", j.used, j.a.Hard), "")
+		}
+		return false
+	}
+	if j.a.Soft > 0 && j.used >= j.a.Soft && !j.warned {
+		j.warned = true
+		j.emit("warn", fmt.Sprintf("soft token limit: %d of %d tokens used", j.used, j.a.Soft), "")
+	}
+	return true
+}
+
 func refreshDiff(agentID, dir, base string) {
 	if fs, err := worktreeDiff(dir, base); err == nil {
 		adds, dels := diffStat(fs)
@@ -538,9 +576,14 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 	case <-j.ctx.Done():
 		return "", j.ctx.Err()
 	}
+	if j.overLimit {
+		return "", errTokenLimit
+	}
 	rt := runtimes[j.a.Runtime]
+	ctx, cancel := context.WithCancel(j.ctx) // cancelled early when the hard token limit is hit
+	defer cancel()
 	// ponytail: cancel kills the agent process only, not its children; use a process group if strays show up.
-	cmd, err := rt.command(j.ctx, j.a.Model, j.a.Args, prompt)
+	cmd, err := rt.command(ctx, j.a.Model, j.a.Args, prompt)
 	if err != nil {
 		return "", err
 	}
@@ -557,6 +600,26 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 	var cost float64
 	var in, out int
 	var final, lastMsg, delta string
+	snaps := map[string][2]int{} // message id -> latest usage snapshot
+	usage := func(e Event) {
+		din, dout := e.In, e.Out
+		switch {
+		case e.ID == "total" && len(snaps) > 0:
+			din, dout = 0, 0 // already counted message by message
+		case e.ID != "" && e.ID != "total":
+			prev := snaps[e.ID]
+			snaps[e.ID] = [2]int{e.In, e.Out}
+			din, dout = e.In-prev[0], e.Out-prev[1]
+		}
+		if din == 0 && dout == 0 && e.Cost == 0 {
+			return
+		}
+		in, out, cost = in+din, out+dout, cost+e.Cost
+		db.Exec(`UPDATE runs SET cost=?, tok_in=?, tok_out=? WHERE id=?`, cost, in, out, j.run)
+		if !j.account(din, dout, e.Cost) {
+			cancel()
+		}
+	}
 	emit := j.emit
 	flush := func() { // streamed text becomes one message
 		if t := strings.TrimSpace(delta); t != "" {
@@ -571,9 +634,7 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 		if l := strings.TrimSpace(string(line)); l != "" {
 			// worktree-relative paths read better; raw keeps the original line
 			for i, e := range rt.Parse([]byte(strings.ReplaceAll(l, dir+"/", ""))) {
-				cost += e.Cost
-				in += e.In
-				out += e.Out
+				usage(e)
 				if e.Kind == "delta" {
 					delta += e.Text
 					continue
@@ -610,6 +671,9 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 		time.Now().UnixMilli(), cmd.ProcessState.ExitCode(), cost, in, out, j.run)
 	if final == "" {
 		final = lastMsg
+	}
+	if j.overLimit {
+		return final, errTokenLimit
 	}
 	return final, werr
 }

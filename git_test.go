@@ -143,3 +143,63 @@ func TestHunksRevertMerge(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeInto(t *testing.T) {
+	repo := newRepo(t) // on main, with a.txt committed
+	root := t.TempDir()
+	dir, _ := ensureWorktree(root, repo, "main", "agent")
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b\n"), 0o644)
+	checkpoint(dir, "work 1")
+	os.WriteFile(filepath.Join(dir, "c.txt"), []byte("c\n"), 0o644)
+	checkpoint(dir, "work 2")
+	src := branchOf("agent")
+
+	if got := defaultTarget(repo); got != "main" {
+		t.Fatalf("default target %q", got)
+	}
+	// a new branch is created from start; squash makes one commit; the user's checkout isn't touched
+	m, err := previewMerge(repo, src, "release", "main")
+	if err != nil || m.Exists || m.Commits != 2 || m.Files != 2 || !m.CanFF || len(m.Conflicts) != 0 {
+		t.Fatalf("preview: %+v %v", m, err)
+	}
+	if _, err := mergeInto(repo, src, "release", "main", "squash", "add b and c"); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := git(repo, "log", "--format=%s", "main..release"); strings.TrimSpace(out) != "add b and c" {
+		t.Fatalf("squash history: %q", out)
+	}
+	if m, _ := previewMerge(repo, src, "release", "main"); m.Files != 0 {
+		t.Fatalf("after a squash there's nothing left to merge: %+v", m)
+	}
+	// merging into the checked-out branch updates the user's files, but only when clean
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("local edit\n"), 0o644)
+	if _, err := mergeInto(repo, src, "main", "main", "merge", "m"); err == nil || !strings.Contains(err.Error(), "uncommitted") {
+		t.Fatalf("dirty checkout should be refused, got %v", err)
+	}
+	git(repo, "checkout", "--", "a.txt")
+	if _, err := mergeInto(repo, src, "main", "main", "ff", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "c.txt")); err != nil {
+		t.Fatal("ff merge should update the checked-out files")
+	}
+	// conflicts are reported by the preview and leave the target untouched when attempted
+	os.WriteFile(filepath.Join(repo, "b.txt"), []byte("theirs\n"), 0o644)
+	checkpoint(repo, "conflicting b")
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("ours\n"), 0o644)
+	checkpoint(dir, "change b")
+	if m, _ := previewMerge(repo, src, "main", "main"); len(m.Conflicts) != 1 || m.Conflicts[0] != "b.txt" {
+		t.Fatalf("conflicts: %+v", m.Conflicts)
+	}
+	if _, err := mergeInto(repo, src, "newbranch", "main", "merge", "m"); err == nil || branchExists(repo, "newbranch") {
+		t.Fatalf("a failed merge into a new branch must not leave the branch behind (err %v)", err)
+	}
+	before, _ := git(repo, "rev-parse", "main")
+	if _, err := mergeInto(repo, src, "main", "main", "merge", "m"); err == nil {
+		t.Fatal("conflicting merge should fail")
+	}
+	after, _ := git(repo, "rev-parse", "main")
+	if out, _ := git(repo, "status", "--porcelain"); before != after || out != "" {
+		t.Fatalf("failed merge left changes: %q", out)
+	}
+}

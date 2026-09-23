@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -209,5 +210,52 @@ func TestStopManagerStopsTeam(t *testing.T) {
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Fatal("stop took too long")
+	}
+}
+
+// Soft limit warns once; hard limit kills the agent mid-run and fails the goal with a clear error.
+func TestTokenLimits(t *testing.T) {
+	data := t.TempDir()
+	worktreeRoot = filepath.Join(data, "worktrees")
+	if err := openDB(filepath.Join(data, "a.db")); err != nil {
+		t.Fatal(err)
+	}
+	// each assistant message reports 100 tokens; the same message repeated must not double count
+	runtimes["chatty"] = Runtime{Bin: "sh", Parse: parseClaude, Args: func(string) []string {
+		return []string{"-c", `cat >/dev/null
+for i in 1 2 3 4 5; do
+  echo '{"type":"assistant","message":{"id":"m'$i'","content":[{"type":"text","text":"step '$i'"}],"usage":{"input_tokens":90,"output_tokens":10}}}'
+  echo '{"type":"assistant","message":{"id":"m'$i'","content":[],"usage":{"input_tokens":90,"output_tokens":10}}}'
+  sleep 0.2
+done
+sleep 30`}
+	}}
+	defer delete(runtimes, "chatty")
+
+	p, _ := createProject(Project{Name: "t", Repo: newRepo(t), Base: "main"})
+	saveArrangement(p.ID, []Agent{{ID: "w", Name: "W", Role: "coder", Runtime: "chatty"}})
+	a, _, _ := getAgent("w")
+	a.Soft, a.Hard = 150, 300
+	updateAgent(a)
+	saveGoal("w", Goal{Title: "talk", Checks: "true"})
+	start := time.Now()
+	if err := startGoal("w"); err != nil {
+		t.Fatal(err)
+	}
+	g := waitDone(t, "w")
+	if g.Status != "failed" || !strings.Contains(g.Feedback, "hard limit of 300") {
+		t.Fatalf("goal: %+v", g)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("hard limit should stop the agent right away, not after it finishes")
+	}
+	s, _ := projectSummary(p.ID)
+	if st := s.Agents["w"]; st.Tokens != 300 || st.AllTokens != 300 {
+		t.Fatalf("tokens counted: %+v", st)
+	}
+	var warns int
+	db.QueryRow(`SELECT count(*) FROM events WHERE agent_id='w' AND kind='warn'`).Scan(&warns)
+	if warns != 1 {
+		t.Fatalf("soft limit warnings: %d", warns)
 	}
 }

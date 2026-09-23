@@ -57,7 +57,7 @@ h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: v
 main { overflow: auto; padding: 32px; }
 main.drop { background: var(--drop); }
 
-.card { display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--panel); border: 1px solid var(--line);
+.card { position: relative; display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--panel); border: 1px solid var(--line);
   border-left: 3px solid var(--c, var(--accent)); padding: 10px 14px; cursor: grab; user-select: none; width: 210px; }
 .card:hover { border-color: var(--muted); border-left-color: var(--c); }
 .card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -69,6 +69,20 @@ main.drop { background: var(--drop); }
 .card .now { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 14px; }
 .card .badges { display: flex; gap: 8px; }
 .card .badges:empty { display: none; }
+.card .badges .warn { color: var(--verifying); font-weight: 600; } .card .badges .over { color: var(--failed); font-weight: 600; }
+/* working agents: an outline in their status color plus a sweeping bar, so activity is visible at a glance */
+.card.busy { border-color: var(--s); border-left-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s) 22%, transparent); }
+.card.busy::after { content: ""; position: absolute; left: 0; right: 0; top: -1px; height: 3px;
+  background: linear-gradient(90deg, transparent, var(--s), transparent) no-repeat; background-size: 40% 100%; animation: sweep 1.1s linear infinite; }
+.card.busy .now { color: var(--text); }
+.card .elapsed { color: var(--s); font-weight: 600; }
+@keyframes sweep { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+#bar .live { display: inline-block; width: 8px; height: 8px; background: var(--running); margin-right: 4px; vertical-align: middle; animation: pulse 1s infinite alternate; }
+#bar .live[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .card.busy::after { animation: none; background: var(--s); }
+  .st::before, #bar .live { animation: none !important; }
+}
 .st::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: var(--s, var(--idle)); }
 .busy .st::before, .st.busy::before { animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .3; } }
@@ -95,7 +109,13 @@ aside .card { display: grid; width: 100%; margin-bottom: 8px; }
 .tree ul ul::before { content: ""; position: absolute; top: 0; left: 50%; height: 20px; border-left: 1px solid var(--line); }
 .tree ul:not(:has(li)) { display: none; }
 
-#inspector { width: min(560px, 45vw); border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+#inspector { width: var(--iw, min(560px, 45vw)); min-width: 320px; max-width: 85vw; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; position: relative; }
+#resize { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; z-index: 3; }
+#resize:hover, #resize.on { background: linear-gradient(90deg, transparent 4px, var(--accent) 4px, var(--accent) 6px, transparent 6px); }
+body.resizing { cursor: col-resize; user-select: none; }
+.istats { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 14px; border-bottom: 1px solid var(--line); font: 12px ui-monospace, monospace; color: var(--muted); }
+.istats b { color: var(--text); font-weight: 600; }
+.istats .warn { color: var(--verifying); } .istats .over { color: var(--failed); }
 #inspector[hidden] { display: none; }
 .ihead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .ihead .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -131,9 +151,26 @@ aside .card { display: grid; width: 100%; margin-bottom: 8px; }
 .hunk .hh { display: flex; align-items: center; }
 .cp { display: grid; grid-template-columns: 64px 1fr auto auto; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--sunk); font: 12px ui-monospace, monospace; }
 .cp .t { color: var(--muted); }
+.status { font-size: 12px; min-height: 18px; margin-top: 8px; }
+.status.ok { color: var(--done); } .status.bad { color: var(--failed); }
+.note { border-left: 3px solid var(--verifying); background: var(--sunk); padding: 6px 10px; font-size: 12px; margin-top: 10px; }
+.note.bad { border-left-color: var(--failed); }
+#stale { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 20; background: var(--text); color: var(--bg); padding: 8px 14px; display: flex; gap: 12px; align-items: center; font-size: 13px; }
+#stale[hidden] { display: none; }
+#stale button { background: var(--accent); color: var(--on-accent); border: 0; }
+.card .edit { margin-left: auto; color: var(--muted); cursor: pointer; padding: 0 2px; }
+.card .edit:hover { color: var(--text); }
+#new-type { width: 100%; margin-top: 4px; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.radios { display: grid; gap: 6px; }
+.radios label { display: flex; gap: 8px; align-items: baseline; margin: 0; color: var(--text); font-size: 13px; }
+.radios input { width: auto; }
+.radios small { color: var(--muted); }
+#m-preview { font-size: 13px; margin-top: 12px; display: grid; gap: 6px; }
+#m-preview ul { margin: 0; padding-left: 18px; font: 12px ui-monospace, monospace; }
 #log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
 
-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(440px, 92vw); }
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(460px, 92vw); }
 dialog::backdrop { background: #0006; }
 dialog h3 { margin: 0 0 4px; font-size: 15px; }
 </style>
@@ -162,7 +199,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div id="bar">
     <span class="prog"><i></i></span>
     <span><b id="n-done">0</b>/<b id="n-goals">0</b> done</span>
-    <span><b id="n-running">0</b> running</span>
+    <span><span class="live" hidden></span><b id="n-running">0</b> running</span>
     <details id="needs" data-n="0"><summary>Needs you (<span id="n-needs">0</span>)</summary><ul></ul></details>
     <span>$<b id="cost">0.00</b></span>
   </div>
@@ -174,11 +211,13 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 </header>
 
 <aside id="palette">
-  <h2>Agents</h2>
+  <h2>Agent types</h2>
   <div class="card" draggable="true" data-role="manager" data-new><span class="name">Manager</span><span class="meta">manager</span></div>
   <div class="card" draggable="true" data-role="coder" data-new><span class="name">Coder</span><span class="meta">coder</span></div>
   <div class="card" draggable="true" data-role="reviewer" data-new><span class="name">Reviewer</span><span class="meta">reviewer</span></div>
   <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
+  <div id="custom-types"></div>
+  <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
   <p class="hint">Drag onto an agent to nest it. Drop on empty space for a new root. Double-click to rename. Click to open.</p>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
 </aside>
@@ -186,13 +225,16 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 <main class="tree"><ul id="roots">{{range .Roots}}{{template "node" .}}{{end}}</ul></main>
 
 <aside id="inspector" hidden>
+  <div id="resize" title="Drag to resize"></div>
   <div class="ihead">
     <span class="st" id="i-status" data-status="idle"></span>
     <span class="name" id="i-name"></span>
+    <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
     <button id="i-run" class="primary">Run</button>
     <button id="i-stop" class="danger">Stop</button>
     <button id="i-close" title="Close">×</button>
   </div>
+  <div class="istats" id="i-stats"></div>
   <div class="tabs">
     <button data-tab="goal" class="on">Goal</button><button data-tab="logs">Logs</button><button data-tab="diff">Diff</button><button data-tab="settings">Settings</button>
   </div>
@@ -216,6 +258,8 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
       <button id="h-remove" class="danger" title="Undo these changes in this agent's work; it won't re-add them">Remove</button>
       <button id="h-promote" title="Copy these changes into the manager's work">Promote to manager</button>
     </div>
+    <p class="status" id="diff-msg" role="status"></p>
+    <div id="diff-note"></div>
     <div id="diff"></div>
     <h2 style="margin-top:20px">Checkpoints</h2>
     <div id="checkpoints"></div>
@@ -227,7 +271,13 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <label>Model (optional)</label><input name="model" placeholder="default">
     <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash  (generic: the whole command)">
     <label>Instructions</label><textarea name="prompt" rows="6" placeholder="How this agent should work"></textarea>
+    <div class="pair">
+      <div><label>Soft token limit (warns)</label><input name="tokenSoft" type="number" min="0" step="1000" placeholder="none"></div>
+      <div><label>Hard token limit (stops)</label><input name="tokenHard" type="number" min="0" step="1000" placeholder="none"></div>
+    </div>
+    <p class="hint" style="margin-top:6px">Per run, counting input (including cached) and output tokens.</p>
     <div class="row"><button class="primary">Save settings</button></div>
+    <p class="status" id="a-msg" role="status"></p>
   </form>
 </aside>
 
@@ -241,7 +291,45 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   </form>
 </dialog>
 
-<script>window.PROJECT = {{.Project}};</script>
+<dialog id="type-dialog">
+  <form method="dialog" id="type-form">
+    <h3></h3>
+    <div class="pair">
+      <div><label>Name (used as the role)</label><input name="name" required pattern="[A-Za-z0-9_\-]+" placeholder="security-reviewer"></div>
+      <div><label>Color</label><input name="color" type="color" value="#3d6fe0" style="height:34px;padding:2px"></div>
+    </div>
+    <div class="pair">
+      <div><label>Runtime</label><select name="runtime">{{range .Runtimes}}<option value="{{.}}">{{.}}{{if not (index $.Installed .)}} (not installed){{end}}</option>{{end}}</select></div>
+      <div><label>Model (optional)</label><input name="model" placeholder="default"></div>
+    </div>
+    <label>Extra CLI args (optional)</label><input name="args" class="mono">
+    <label>Instructions</label><textarea name="prompt" rows="5" placeholder="Review every change for injection and auth bugs."></textarea>
+    <p class="hint" style="margin-top:6px">New agents dragged from this type start with these settings. Existing agents keep theirs.</p>
+    <div class="row"><button class="primary" value="save">Save</button><button value="cancel" formnovalidate>Cancel</button><span class="sp"></span><button id="t-delete" class="danger" value="delete" formnovalidate>Delete</button></div>
+    <p class="status bad" id="t-err"></p>
+  </form>
+</dialog>
+
+<dialog id="merge-dialog">
+  <form method="dialog" id="merge-form">
+    <h3>Merge <span id="m-agent"></span>'s work</h3>
+    <label>Into branch (created if it doesn't exist)</label><input name="target" class="mono" required>
+    <label>How</label>
+    <div class="radios">
+      <label><input type="radio" name="strategy" value="merge" checked> Merge commit <small>keeps every checkpoint</small></label>
+      <label><input type="radio" name="strategy" value="squash"> Squash <small>one commit with all the changes</small></label>
+      <label><input type="radio" name="strategy" value="ff" id="m-ff"> Fast-forward only <small>no merge commit</small></label>
+    </div>
+    <label>Commit message</label><input name="message">
+    <div id="m-preview"></div>
+    <div class="row"><button class="primary" value="merge" id="m-go">Merge</button><button value="cancel" formnovalidate>Close</button></div>
+    <p class="status" id="m-msg" role="status"></p>
+  </form>
+</dialog>
+
+<div id="stale" hidden>Arranger was restarted with new code. <button id="reload">Reload page</button></div>
+
+<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.BUILD = {{.Build}};</script>
 <script src="/app.js"></script>
 </body>
 </html>

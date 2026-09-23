@@ -224,3 +224,136 @@ func mergeBranch(dir, branch, msg string) error {
 	}
 	return nil
 }
+
+// checkedOutAt returns the worktree that has branch checked out, or "".
+func checkedOutAt(repo, branch string) string {
+	out, _ := git(repo, "worktree", "list", "--porcelain")
+	path := ""
+	for _, l := range strings.Split(out, "\n") {
+		if p, ok := strings.CutPrefix(l, "worktree "); ok {
+			path = p
+		}
+		if l == "branch refs/heads/"+branch {
+			return path
+		}
+	}
+	return ""
+}
+
+// defaultTarget is main or master, whichever exists (main when neither does).
+func defaultTarget(repo string) string {
+	for _, b := range []string{"main", "master"} {
+		if branchExists(repo, b) {
+			return b
+		}
+	}
+	return "main"
+}
+
+type MergePreview struct {
+	Source     string   `json:"source"`
+	Target     string   `json:"target"`
+	Exists     bool     `json:"exists"`     // false: it will be created from Start
+	Start      string   `json:"start"`      // what a new target branch starts from
+	CheckedOut string   `json:"checkedOut"` // worktree where target is checked out, if any
+	Dirty      bool     `json:"dirty"`      // that worktree has uncommitted changes
+	Commits    int      `json:"commits"`
+	Files      int      `json:"files"`
+	Adds       int      `json:"adds"`
+	Dels       int      `json:"dels"`
+	CanFF      bool     `json:"canFF"`
+	Conflicts  []string `json:"conflicts"`
+}
+
+// previewMerge reports what merging source into target would do, without changing anything.
+func previewMerge(repo, source, target, start string) (MergePreview, error) {
+	m := MergePreview{Source: source, Target: target, Start: start, Exists: branchExists(repo, target), Conflicts: []string{}}
+	into := target
+	if !m.Exists {
+		into = start
+	}
+	if m.CheckedOut = checkedOutAt(repo, target); m.CheckedOut != "" {
+		out, _ := git(m.CheckedOut, "status", "--porcelain", "--untracked-files=no")
+		m.Dirty = strings.TrimSpace(out) != ""
+	}
+	out, err := git(repo, "rev-list", "--count", into+".."+source)
+	if err != nil {
+		return m, err
+	}
+	fmt.Sscan(out, &m.Commits)
+	_, err = git(repo, "merge-base", "--is-ancestor", into, source)
+	m.CanFF = err == nil
+	// What the merge would change is the difference between the target and the merged tree;
+	// that also reads "nothing" after a squash, which leaves the commits unmerged but the content in.
+	merged, err := git(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", into, source)
+	ls := lines(merged)
+	if err != nil {
+		if len(ls) < 2 {
+			return m, err
+		}
+		m.Conflicts = ls[1:] // first line is the tree id
+		out, _ = git(repo, "diff", "--numstat", into+"..."+source)
+	} else {
+		out, _ = git(repo, "diff", "--numstat", into, ls[0])
+	}
+	for _, l := range lines(out) {
+		var a, d int
+		fmt.Sscan(l, &a, &d) // binary files show "-" and count as 0
+		m.Files, m.Adds, m.Dels = m.Files+1, m.Adds+a, m.Dels+d
+	}
+	return m, nil
+}
+
+// mergeInto merges source into target with strategy merge|squash|ff, creating target from start
+// if needed. It works in target's own checkout when that is clean, else in a temporary one.
+func mergeInto(repo, source, target, start, strategy, msg string) (sha string, err error) {
+	if !branchExists(repo, target) {
+		if _, err := git(repo, "branch", target, start); err != nil {
+			return "", err
+		}
+		defer func() {
+			if err != nil {
+				git(repo, "branch", "-D", target) // don't leave behind a branch for a merge that didn't happen
+			}
+		}()
+	}
+	dir := checkedOutAt(repo, target)
+	if dir != "" {
+		if out, _ := git(dir, "status", "--porcelain", "--untracked-files=no"); strings.TrimSpace(out) != "" {
+			return "", fmt.Errorf("%s has uncommitted changes in %s; commit or stash them first", target, dir)
+		}
+	} else {
+		tmp, err := os.MkdirTemp("", "arranger-merge-")
+		if err != nil {
+			return "", err
+		}
+		os.Remove(tmp) // git worktree add wants to create it
+		if _, err := git(repo, "worktree", "add", "-q", tmp, target); err != nil {
+			return "", err
+		}
+		defer git(repo, "worktree", "remove", "--force", tmp)
+		dir = tmp
+	}
+	var who []string // the user's own identity when git has one, else arranger's
+	if out, _ := git(dir, "config", "user.email"); strings.TrimSpace(out) == "" {
+		who = identity
+	}
+	switch strategy {
+	case "merge":
+		_, err = git(dir, append(who, "merge", "--no-ff", "-m", msg, source)...)
+	case "squash":
+		if _, err = git(dir, "merge", "--squash", source); err == nil {
+			_, err = git(dir, append(who, "commit", "-q", "-m", msg)...)
+		}
+	case "ff":
+		_, err = git(dir, "merge", "--ff-only", source)
+	default:
+		return "", fmt.Errorf("unknown strategy %q", strategy)
+	}
+	if err != nil {
+		git(dir, "reset", "--merge") // back to where target was
+		return "", err
+	}
+	out, err := git(dir, "rev-parse", "--short", "HEAD")
+	return strings.TrimSpace(out), err
+}

@@ -15,7 +15,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
+
+// buildID changes on every start, so pages served by an older process can tell they're stale.
+var buildID = fmt.Sprint(time.Now().UnixNano())
 
 //go:embed *.html app.js
 var files embed.FS
@@ -111,6 +115,11 @@ func arrange(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	types, err := listTypes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	installed := installedRuntimes()
 	names := make([]string, 0, len(installed))
 	for n := range installed {
@@ -119,6 +128,7 @@ func arrange(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(names)
 	err = tmpl.ExecuteTemplate(w, "arrange.html", map[string]any{
 		"Projects": ps, "Project": cur, "Roots": buildTree(as), "Runtimes": names, "Installed": installed, "Blank": &Node{},
+		"Types": types, "Build": buildID,
 	})
 	if err != nil {
 		log.Println(err)
@@ -226,6 +236,10 @@ func updateAgentH(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent needs a name", http.StatusBadRequest)
 		return
 	}
+	if a.Soft < 0 || a.Hard < 0 || (a.Hard > 0 && a.Soft > a.Hard) {
+		http.Error(w, "token limits: use 0 for none, and keep the soft limit below the hard one", http.StatusBadRequest)
+		return
+	}
 	if err := updateAgent(a); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -313,13 +327,16 @@ func agentWork(w http.ResponseWriter, r *http.Request) (a Agent, p Project, g Go
 	return a, p, g, dir, true
 }
 
+// diffH returns the agent's changes, and mergedInto: the manager whose work already contains
+// them (so removing a change here won't remove it there).
 func diffH(w http.ResponseWriter, r *http.Request) {
-	_, _, g, dir, ok := agentWork(w, r)
+	a, p, g, dir, ok := agentWork(w, r)
 	if !ok {
 		return
 	}
+	res := map[string]any{"files": []FileDiff{}, "mergedInto": ""}
 	if dir == "" {
-		writeJSON(w, []FileDiff{}) // never ran, so no changes yet
+		writeJSON(w, res) // never ran, so no changes yet
 		return
 	}
 	fs, err := worktreeDiff(dir, g.Base)
@@ -327,8 +344,106 @@ func diffH(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, fs)
+	res["files"] = fs
+	if mgr, _, err := getAgent(a.Parent); err == nil && len(fs) > 0 && branchExists(p.Repo, branchOf(mgr.ID)) {
+		if _, err := git(p.Repo, "merge-base", "--is-ancestor", branchOf(a.ID), branchOf(mgr.ID)); err == nil {
+			res["mergedInto"] = mgr.Name
+		}
+	}
+	writeJSON(w, res)
 }
+
+// mergeH previews (GET) or performs (POST) merging an agent's branch into a branch of the user's repo.
+func mergeH(w http.ResponseWriter, r *http.Request) {
+	a, p, g, dir, ok := agentWork(w, r)
+	if !ok {
+		return
+	}
+	if dir == "" {
+		http.Error(w, a.Name+" has no work to merge yet", http.StatusBadRequest)
+		return
+	}
+	var req struct{ Target, Strategy, Message string }
+	if r.Method == http.MethodPost && !readJSON(w, r, &req) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		req.Target = r.URL.Query().Get("target")
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	if req.Target == "" {
+		req.Target = defaultTarget(p.Repo)
+	}
+	if _, err := git(p.Repo, "check-ref-format", "--branch", req.Target); err != nil || strings.HasPrefix(req.Target, "arranger/") {
+		http.Error(w, fmt.Sprintf("%q isn't a branch name you can merge into", req.Target), http.StatusBadRequest)
+		return
+	}
+	if isRunning(a.ID) {
+		http.Error(w, "stop "+a.Name+" before merging its work", http.StatusConflict)
+		return
+	}
+	checkpoint(dir, "arranger: save work before merge") // include anything not yet committed
+	if r.Method == http.MethodGet {
+		m, err := previewMerge(p.Repo, branchOf(a.ID), req.Target, p.Base)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, m)
+		return
+	}
+	if req.Message = strings.TrimSpace(req.Message); req.Message == "" {
+		req.Message = g.Title
+	}
+	if req.Message == "" {
+		req.Message = "Merge work from " + a.Name
+	}
+	sha, err := mergeInto(p.Repo, branchOf(a.ID), req.Target, p.Base, req.Strategy, req.Message)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	e := LogEvent{Agent: a.ID, Kind: "merge", Text: fmt.Sprintf("merged into %s (%s) → %s", req.Target, req.Strategy, sha)}
+	addEvent(&e)
+	hub.publish(p.ID, map[string]any{"type": "event", "event": e})
+	writeJSON(w, map[string]string{"sha": sha, "target": req.Target})
+}
+
+func typesH(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		if err := deleteType(r.PathValue("id")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var t AgentType
+	if !readJSON(w, r, &t) {
+		return
+	}
+	t.ID = r.PathValue("id") // "" on create
+	t.Name = strings.ToLower(strings.TrimSpace(t.Name))
+	if !safeID.MatchString(t.Name) {
+		http.Error(w, "type name: letters, digits, - or _ only", http.StatusBadRequest)
+		return
+	}
+	if !colorRe.MatchString(t.Color) {
+		http.Error(w, "color must look like #3d6fe0", http.StatusBadRequest)
+		return
+	}
+	if _, ok := runtimes[t.Runtime]; !ok {
+		http.Error(w, "unknown runtime "+t.Runtime, http.StatusBadRequest)
+		return
+	}
+	if err := saveType(&t); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, t)
+}
+
+var colorRe = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 func checkpointsH(w http.ResponseWriter, r *http.Request) {
 	_, _, g, dir, ok := agentWork(w, r)
@@ -478,7 +593,7 @@ func sseH(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	c := hub.subscribe(r.URL.Query().Get("project"))
 	defer hub.unsubscribe(c)
-	fmt.Fprint(w, ": ok\n\n")
+	fmt.Fprintf(w, "data: {\"type\":\"hello\",\"build\":%q}\n\n", buildID) // lets an open page notice a restart onto new code
 	flusher.Flush()
 	for {
 		select {
@@ -541,6 +656,11 @@ func main() {
 	http.HandleFunc("GET /api/agents/{id}/checkpoints", checkpointsH)
 	http.HandleFunc("POST /api/agents/{id}/revert", revertH)
 	http.HandleFunc("POST /api/agents/{id}/hunks", hunksH)
+	http.HandleFunc("GET /api/agents/{id}/merge", mergeH)
+	http.HandleFunc("POST /api/agents/{id}/merge", mergeH)
+	http.HandleFunc("POST /api/types", typesH)
+	http.HandleFunc("PUT /api/types/{id}", typesH)
+	http.HandleFunc("DELETE /api/types/{id}", typesH)
 	http.HandleFunc("GET /api/events", sseH)
 
 	host, _, _ := net.SplitHostPort(*addr)

@@ -16,6 +16,9 @@ type Event struct {
 	Cost float64
 	In   int
 	Out  int
+	// ID names the API message a usage snapshot belongs to: repeated snapshots of one message
+	// replace each other. "total" marks an end-of-run total, used only if no snapshots came.
+	ID string
 }
 
 // Runtime describes how to drive one agent CLI headlessly.
@@ -122,6 +125,13 @@ func parseClaude(line []byte) []Event {
 		return []Event{{Kind: "msg", Text: string(line)}}
 	}
 	var msg struct {
+		ID    string `json:"id"`
+		Usage *struct {
+			In     int `json:"input_tokens"`
+			CacheW int `json:"cache_creation_input_tokens"`
+			CacheR int `json:"cache_read_input_tokens"`
+			Out    int `json:"output_tokens"`
+		} `json:"usage"`
 		Content []struct {
 			Type    string          `json:"type"`
 			Text    string          `json:"text"`
@@ -147,6 +157,9 @@ func parseClaude(line []byte) []Event {
 				es = append(es, toolEvent(c.Name, c.Input))
 			}
 		}
+		if u := msg.Usage; u != nil && msg.ID != "" {
+			es = append(es, Event{Kind: "usage", ID: msg.ID, In: u.In + u.CacheW + u.CacheR, Out: u.Out})
+		}
 	case "user":
 		for _, c := range msg.Content {
 			if c.Type == "tool_result" && c.IsError {
@@ -155,7 +168,7 @@ func parseClaude(line []byte) []Event {
 		}
 	case "result":
 		u := m.Usage
-		e := Event{Kind: "done", Text: strings.TrimSpace(m.Result), Cost: m.Cost, In: u.In + u.CacheW + u.CacheR, Out: u.Out}
+		e := Event{Kind: "done", Text: strings.TrimSpace(m.Result), Cost: m.Cost, In: u.In + u.CacheW + u.CacheR, Out: u.Out, ID: "total"}
 		if m.IsError || m.Subtype != "success" {
 			e.Kind, e.Text = "error", m.Subtype+": "+clip(m.Result+rawText(m.Error), 300)
 		}
