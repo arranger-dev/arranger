@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"t1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"i0","type":"reasoning","text":"thinking"}}
+{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"bash -lc ls","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"bash -lc ls","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[{"path":"a.txt","kind":"add"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"Created a.txt."}}
+{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":40}}
+{"type":"turn.failed","error":{"message":"stream disconnected"}}

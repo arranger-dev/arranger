@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arranger · {{.Project.Name}}</title>
+<script>try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "light" } catch {}</script>
+<style>
+:root {
+  --bg: #f7f7f8; --panel: #fff; --sunk: #f0f1f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
+  --accent: #3d6fe0; --on-accent: #fff; --drop: #3d6fe01f;
+  --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
+  --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079;
+  --add-bg: #e6f4ea; --del-bg: #fdecec;
+  font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+}
+[data-theme=dark] {
+  --bg: #0e0f12; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
+  --accent: #7aa2f7; --on-accent: #0e0f12; --drop: #7aa2f733;
+  --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a;
+  --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98;
+  --add-bg: #1f2d22; --del-bg: #331f24;
+}
+* { box-sizing: border-box; border-radius: 0; }
+body { margin: 0; background: var(--bg); color: var(--text); display: grid; grid-template: auto 1fr / 180px 1fr auto; height: 100vh; overflow: hidden; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--line); padding: 5px 12px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--failed); }
+input, select, textarea { background: var(--panel); border: 1px solid var(--line); padding: 6px 8px; width: 100%; }
+textarea { resize: vertical; min-height: 60px; }
+.mono, textarea.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header h1 { font: 600 14px ui-monospace, monospace; margin: 0 8px 0 0; }
+header h1 a { color: inherit; text-decoration: none; }
+header select { width: auto; }
+.sp { flex: 1; }
+#bar { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--muted); }
+#bar .prog { width: 120px; height: 6px; background: var(--sunk); border: 1px solid var(--line); }
+#bar .prog i { display: block; height: 100%; background: var(--done); width: 0; }
+#bar b { color: var(--text); font-weight: 600; }
+#needs { position: relative; }
+#needs summary { cursor: pointer; list-style: none; color: var(--failed); font-weight: 600; }
+#needs[data-n="0"] summary { color: var(--muted); font-weight: 400; }
+#needs ul { position: absolute; top: 22px; left: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); margin: 0; padding: 4px 0; list-style: none; min-width: 220px; }
+#needs li { padding: 6px 12px; cursor: pointer; color: var(--text); }
+#needs li:hover { background: var(--sunk); }
+#msg { font-size: 12px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#msg.err { color: var(--failed); }
+
+aside#palette { border-right: 1px solid var(--line); padding: 12px; overflow: auto; }
+h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.hint { font-size: 12px; color: var(--muted); margin-top: 16px; }
+main { overflow: auto; padding: 32px; }
+main.drop { background: var(--drop); }
+
+.card { display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--panel); border: 1px solid var(--line);
+  border-left: 3px solid var(--c, var(--accent)); padding: 10px 14px; cursor: grab; user-select: none; width: 210px; }
+.card:hover { border-color: var(--muted); border-left-color: var(--c); }
+.card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
+.card.drop { outline: 2px dashed var(--accent); background: var(--drop); }
+.card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .x { color: var(--muted); cursor: pointer; }
+.card .x:hover { color: var(--failed); }
+.card .meta, .card .now, .card .badges { grid-column: 1 / -1; font: 11px ui-monospace, monospace; color: var(--muted); }
+.card .now { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 14px; }
+.card .badges { display: flex; gap: 8px; }
+.card .badges:empty { display: none; }
+.st::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: var(--s, var(--idle)); }
+[data-status=running] .st::before, [data-status=verifying] .st::before, .st[data-status=running]::before, .st[data-status=verifying]::before { animation: pulse 1s infinite alternate; }
+@keyframes pulse { to { opacity: .3; } }
+[data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
+[data-status=failed] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
+.ok { color: var(--done); } .bad { color: var(--failed); }
+[data-role=manager] { --c: var(--manager); } [data-role=coder] { --c: var(--coder); }
+[data-role=reviewer] { --c: var(--reviewer); } [data-role=tester] { --c: var(--tester); }
+aside .card { display: grid; width: 100%; margin-bottom: 8px; }
+
+/* org-chart connectors */
+.tree ul { display: flex; justify-content: center; padding: 20px 0 0; margin: 0; position: relative; }
+.tree > ul { padding-top: 0; }
+.tree li { list-style: none; text-align: center; position: relative; padding: 20px 6px 0; }
+.tree > ul > li { padding-top: 0; }
+.tree li::before, .tree li::after { content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 20px; border-top: 1px solid var(--line); }
+.tree li::after { right: auto; left: 50%; border-left: 1px solid var(--line); }
+.tree li:only-child::before, .tree li:only-child::after { display: none; }
+.tree li:only-child { padding-top: 20px; }
+.tree > ul > li::before, .tree > ul > li::after { display: none; }
+.tree li:first-child::before, .tree li:last-child::after { border: 0; }
+.tree li:last-child::before { border-right: 1px solid var(--line); }
+.tree ul ul::before { content: ""; position: absolute; top: 0; left: 50%; height: 20px; border-left: 1px solid var(--line); }
+.tree ul:not(:has(li)) { display: none; }
+
+#inspector { width: min(560px, 45vw); border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+#inspector[hidden] { display: none; }
+.ihead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.ihead .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 8px 14px; color: var(--muted); }
+.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.pane { flex: 1; overflow: auto; padding: 0 14px 14px; min-height: 0; }
+.pane[hidden] { display: none; }
+.row { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+.feedback { white-space: pre-wrap; background: var(--del-bg); border: 1px solid var(--line); padding: 8px; max-height: 200px; overflow: auto; }
+
+#log { font: 12px/1.5 ui-monospace, monospace; padding-top: 8px; }
+#log .ev { display: grid; grid-template-columns: 64px 48px 1fr; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--sunk); cursor: default; }
+#log .ev[data-raw] { cursor: pointer; }
+#log .t { color: var(--muted); }
+#log .k { color: var(--muted); }
+#log .x { white-space: pre-wrap; word-break: break-word; }
+#log .ev[data-kind=error] .x, #log .ev[data-kind=error] .k { color: var(--failed); }
+#log .ev[data-kind=done] .k, #log .ev[data-kind=file] .k { color: var(--done); }
+#log .ev[data-kind=tool] .k { color: var(--accent); }
+#log .ev[data-kind=stderr] .x { color: var(--muted); }
+#log pre { grid-column: 1 / -1; margin: 4px 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all; }
+
+.file { border: 1px solid var(--line); margin-top: 10px; }
+.file summary { display: flex; gap: 10px; padding: 6px 10px; background: var(--sunk); cursor: pointer; font: 12px ui-monospace, monospace; }
+.file summary span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.hunk { font: 12px/1.45 ui-monospace, monospace; overflow-x: auto; }
+.hunk .hh { color: var(--muted); padding: 2px 10px; background: var(--sunk); border-top: 1px solid var(--line); }
+.hunk div.l { white-space: pre; padding: 0 10px; }
+.hunk .a { background: var(--add-bg); } .hunk .d { background: var(--del-bg); }
+.empty { color: var(--muted); padding: 20px 0; }
+
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(440px, 92vw); }
+dialog::backdrop { background: #0006; }
+dialog h3 { margin: 0 0 4px; font-size: 15px; }
+</style>
+</head>
+<body data-project="{{.Project.ID}}">
+{{define "node"}}
+<li data-id="{{.ID}}">
+  <div class="card" draggable="true" data-role="{{.Role}}" data-status="idle">
+    <span class="name">{{.Name}}</span><span class="x" title="Remove">×</span>
+    <span class="meta"><span class="st"></span><span class="role">{{.Role}}</span> · <span class="rt">{{.Runtime}}</span></span>
+    <span class="now"></span>
+    <span class="badges"></span>
+  </div>
+  <ul>{{range .Children}}{{template "node" .}}{{end}}</ul>
+</li>
+{{end}}
+<template id="node-tpl">{{template "node" .Blank}}</template>
+
+<header>
+  <h1><a href="/">arranger</a></h1>
+  <select id="project" aria-label="Project">
+    {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
+  </select>
+  <button id="new-project" title="New project">+ New</button>
+  <button id="edit-project" title="Project settings">Settings</button>
+  <div id="bar">
+    <span class="prog"><i></i></span>
+    <span><b id="n-done">0</b>/<b id="n-goals">0</b> done</span>
+    <span><b id="n-running">0</b> running</span>
+    <details id="needs" data-n="0"><summary>Needs you (<span id="n-needs">0</span>)</summary><ul></ul></details>
+    <span>$<b id="cost">0.00</b></span>
+  </div>
+  <span class="sp"></span>
+  <span id="msg"></span>
+  <button id="theme" title="Toggle theme">◐</button>
+  <button id="save">Save</button>
+  <button id="run-all" class="primary">Run all</button>
+</header>
+
+<aside id="palette">
+  <h2>Agents</h2>
+  <div class="card" draggable="true" data-role="manager" data-new><span class="name">Manager</span><span class="meta">manager</span></div>
+  <div class="card" draggable="true" data-role="coder" data-new><span class="name">Coder</span><span class="meta">coder</span></div>
+  <div class="card" draggable="true" data-role="reviewer" data-new><span class="name">Reviewer</span><span class="meta">reviewer</span></div>
+  <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
+  <p class="hint">Drag onto an agent to nest it. Drop on empty space for a new root. Double-click to rename. Click to open.</p>
+  {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
+</aside>
+
+<main class="tree"><ul id="roots">{{range .Roots}}{{template "node" .}}{{end}}</ul></main>
+
+<aside id="inspector" hidden>
+  <div class="ihead">
+    <span class="st" id="i-status" data-status="idle"></span>
+    <span class="name" id="i-name"></span>
+    <button id="i-run" class="primary">Run</button>
+    <button id="i-stop" class="danger">Stop</button>
+    <button id="i-close" title="Close">×</button>
+  </div>
+  <div class="tabs">
+    <button data-tab="goal" class="on">Goal</button><button data-tab="logs">Logs</button><button data-tab="diff">Diff</button><button data-tab="settings">Settings</button>
+  </div>
+  <form class="pane" data-pane="goal" id="goal-form">
+    <label>Goal</label><input name="title" placeholder="Add rate limiting to /login" required>
+    <label>Details</label><textarea name="body" placeholder="Context the agent needs"></textarea>
+    <label>Acceptance criteria</label><textarea name="criteria" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
+    <label>Checks: one shell command per line, all must exit 0</label><textarea name="checks" class="mono" placeholder="go test ./..."></textarea>
+    <div id="g-feedback" hidden><label>Last failure</label><div class="feedback mono"></div></div>
+    <div class="row"><button class="primary">Save goal</button><span id="g-state" class="hint" style="margin:0"></span></div>
+  </form>
+  <div class="pane" data-pane="logs" hidden>
+    <div class="row"><label style="margin:0;display:flex;gap:6px;align-items:center;width:auto"><input type="checkbox" id="raw" style="width:auto"> show raw output</label></div>
+    <div id="log"></div>
+  </div>
+  <div class="pane" data-pane="diff" hidden>
+    <div class="row"><span id="diff-stat" class="hint" style="margin:0;flex:1"></span><button id="diff-refresh">Refresh</button></div>
+    <div id="diff"></div>
+  </div>
+  <form class="pane" data-pane="settings" id="agent-form" hidden>
+    <label>Name</label><input name="name" required>
+    <label>Runtime</label>
+    <select name="runtime">{{range .Runtimes}}<option value="{{.}}">{{.}}{{if not (index $.Installed .)}} (not installed){{end}}</option>{{end}}</select>
+    <label>Model (optional)</label><input name="model" placeholder="default">
+    <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash">
+    <label>Instructions</label><textarea name="prompt" rows="6" placeholder="How this agent should work"></textarea>
+    <div class="row"><button class="primary">Save settings</button></div>
+  </form>
+</aside>
+
+<dialog id="project-dialog">
+  <form method="dialog" id="project-form">
+    <h3></h3>
+    <label>Name</label><input name="name" required>
+    <label>Git repository path</label><input name="repo" class="mono" placeholder="~/code/my-app">
+    <label>Base branch (blank = current branch)</label><input name="base" class="mono" placeholder="main">
+    <div class="row"><button class="primary" value="save">Save</button><button value="cancel" formnovalidate>Cancel</button><span id="p-err" class="bad" style="font-size:12px"></span></div>
+  </form>
+</dialog>
+
+<script>window.PROJECT = {{.Project}};</script>
+<script src="/app.js"></script>
+</body>
+</html>
