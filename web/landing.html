@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Arranger</title>
+<link rel="icon" type="image/png" href="/arranger.png">
 <script>try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "light" } catch {}</script>
 <style>
 :root {
@@ -29,12 +30,16 @@ code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:
 h1, h2, h3 { text-wrap: balance; margin: 0; }
 p { margin: 0; }
 
-nav { display: flex; align-items: center; gap: 20px; padding: 16px 0; border-bottom: 1px solid var(--line); }
-nav b { font: 600 14px ui-monospace, monospace; }
+/* a solid bar so the grid never runs under the links */
+.navbar { position: sticky; top: 0; z-index: 10; background: var(--panel); border-bottom: 1px solid var(--line); }
+nav { display: flex; align-items: center; gap: 8px; padding: 10px 0; flex-wrap: wrap; }
+nav .brand { display: flex; align-items: center; gap: 10px; font: 600 15px ui-monospace, monospace; text-decoration: none; color: var(--text); }
+nav .brand img { width: 28px; height: 28px; display: block; }
 nav .sp { flex: 1; }
-nav a { color: var(--muted); text-decoration: none; font-size: 13px; }
-nav a:hover { color: var(--text); }
-nav button { font: inherit; background: none; border: 1px solid var(--line); color: var(--text); padding: 2px 8px; cursor: pointer; }
+nav a.nb, nav button { font: 500 13px ui-sans-serif, system-ui, sans-serif; text-decoration: none; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); padding: 7px 14px; cursor: pointer; line-height: 1.2; }
+nav a.nb:hover, nav button:hover { border-color: var(--text); }
+nav a.nb.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
 .hero { padding: 88px 0 48px; display: grid; gap: 16px; }
 .hero h1 { font-size: clamp(32px, 6vw, 52px); line-height: 1.1; letter-spacing: -.02em; }
@@ -93,13 +98,16 @@ footer a { color: var(--muted); }
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="navbar"><div class="wrap">
   <nav>
-    <b>arranger</b><span class="sp"></span>
-    <a href="#why">Why</a><a href="#how">How it works</a><a href="/arrange">Arrange</a>
-    <a href="{{.GitHub}}" rel="noopener">GitHub</a>
+    <a class="brand" href="/"><img src="/arranger.png" alt="">arranger</a><span class="sp"></span>
+    <a class="nb" href="#why">Why</a><a class="nb" href="#how">How it works</a>
+    <a class="nb" href="{{.GitHub}}" rel="noopener">GitHub</a>
     <button id="theme" title="Toggle theme">◐</button>
+    <a class="nb primary" href="/arrange">Open arranger</a>
   </nav>
+</div></div>
+<div class="wrap">
 
   <header class="hero">
     <h1>Arrange agents.<br><span>Ship verified work.</span></h1>

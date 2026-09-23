@@ -1,50 +1,52 @@
-package main
+package orch
 
 import (
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"arranger/internal/agents"
+	"arranger/internal/git"
+	"arranger/internal/store"
 )
 
 // A fake agent that fails the check on its first attempt and fixes it on the second,
 // proving the verify -> feedback -> retry -> done loop end to end.
 func TestRunGoalRetriesUntilChecksPass(t *testing.T) {
-	data := t.TempDir()
-	worktreeRoot = filepath.Join(data, "worktrees")
-	if err := openDB(filepath.Join(data, "a.db")); err != nil {
-		t.Fatal(err)
-	}
-	runtimes["fake"] = Runtime{
+	o := setup(t)
+	agents.Runtimes["fake"] = agents.Runtime{
 		Bin: "sh",
 		Args: func(string) []string {
 			return []string{"-c", `grep -q "PREVIOUS ATTEMPT WAS NOT ACCEPTED" && echo ok > out.txt; ` +
 				`echo '{"type":"result","subtype":"success","result":"did it","total_cost_usd":0.01}'`}
 		},
-		Parse: parseClaude,
+		Parse: agents.Runtimes["claude"].Parse,
 	}
-	defer delete(runtimes, "fake")
+	defer delete(agents.Runtimes, "fake")
 
 	repo := newRepo(t)
-	p, err := createProject(Project{Name: "t", Repo: repo, Base: "main"})
+	p, err := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := saveArrangement(p.ID, []Agent{{ID: "w", Name: "Worker", Role: "coder", Runtime: "fake"}}); err != nil {
+	if err := o.Store.SaveArrangement(p.ID, []store.Agent{{ID: "w", Name: "Worker", Role: "coder", Runtime: "fake"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := startGoal("w"); err == nil {
+	if err := o.Start("w"); err == nil {
 		t.Fatal("run without goal should fail")
 	}
-	saveGoal("w", Goal{Title: "make out.txt", Checks: "test -f out.txt"})
-	if err := startGoal("w"); err != nil {
+	o.Store.SaveGoal("w", store.Goal{Title: "make out.txt", Checks: "test -f out.txt"})
+	if err := o.Start("w"); err != nil {
 		t.Fatal(err)
 	}
 
 	deadline := time.Now().Add(20 * time.Second)
-	var g Goal
+	var g store.Goal
 	for time.Now().Before(deadline) {
-		if g, _ = getGoal("w"); g.Status == "done" || g.Status == "failed" {
+		if g, _ = o.Store.Goal("w"); g.Status == "done" || g.Status == "failed" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -52,40 +54,36 @@ func TestRunGoalRetriesUntilChecksPass(t *testing.T) {
 	if g.Status != "done" || g.Attempts != 2 || g.Passed != 1 || g.Adds != 1 {
 		t.Fatalf("goal: %+v", g)
 	}
-	s, _ := projectSummary(p.ID)
+	s, _ := o.Store.Summary(p.ID)
 	if s.Cost < 0.019 {
 		t.Fatalf("cost not summed: %+v", s)
 	}
-	es, _ := listEvents("w", 100)
+	es, _ := o.Store.Events("w", 100)
 	if len(es) == 0 {
 		t.Fatal("no events logged")
 	}
 }
 
 // waitDone polls until the agent's goal leaves the busy states.
-func waitDone(t *testing.T, id string) Goal {
+func waitDone(t *testing.T, o *Orchestrator, id string) store.Goal {
 	t.Helper()
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		g, _ := getGoal(id)
+		g, _ := o.Store.Goal(id)
 		switch g.Status {
 		case "done", "failed", "blocked", "stopped":
 			return g
 		}
 	}
 	t.Fatal("timed out")
-	return Goal{}
+	return store.Goal{}
 }
 
 // A manager plans for two fake workers, rejects one in its first review, and merges both.
 func TestManagerPlansReviewsMerges(t *testing.T) {
-	data := t.TempDir()
-	worktreeRoot = filepath.Join(data, "worktrees")
-	if err := openDB(filepath.Join(data, "a.db")); err != nil {
-		t.Fatal(err)
-	}
-	flag := filepath.Join(data, "reviewed-once")
-	plain := func(l []byte) []Event { return []Event{{Kind: "msg", Text: string(l)}} }
-	runtimes["fakemgr"] = Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+	o := setup(t)
+	flag := filepath.Join(t.TempDir(), "reviewed-once")
+	plain := func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} }
+	agents.Runtimes["fakemgr"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
 		return []string{"-c", `p=$(cat); echo scribble > junk.txt
 case "$p" in
 *"YOUR TEAM"*) echo '{"subgoals":[{"agent":"a","title":"write a","checks":["test -f a.txt"]},{"agent":"b","title":"write b","checks":["test -f b.txt"]}]}' ;;
@@ -93,15 +91,15 @@ case "$p" in
    else touch ` + flag + `; echo 'Sure: {"verdicts":[{"agent":"a","accept":true},{"agent":"b","accept":false,"feedback":"add a newline"}]}'; fi ;;
 esac`}
 	}}
-	runtimes["fakeworker"] = Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+	agents.Runtimes["fakeworker"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
 		return []string{"-c", `p=$(cat); case "$p" in *"You are Alpha"*) echo a > a.txt ;; *) echo b > b.txt ;; esac; echo worked`}
 	}}
-	defer delete(runtimes, "fakemgr")
-	defer delete(runtimes, "fakeworker")
+	defer delete(agents.Runtimes, "fakemgr")
+	defer delete(agents.Runtimes, "fakeworker")
 
 	repo := newRepo(t)
-	p, _ := createProject(Project{Name: "t", Repo: repo, Base: "main"})
-	err := saveArrangement(p.ID, []Agent{
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
+	err := o.Store.SaveArrangement(p.ID, []store.Agent{
 		{ID: "m", Name: "Lead", Role: "manager", Runtime: "fakemgr"},
 		{ID: "a", Name: "Alpha", Role: "coder", Parent: "m", Runtime: "fakeworker"},
 		{ID: "b", Name: "Beta", Role: "coder", Parent: "m", Runtime: "fakeworker"},
@@ -109,50 +107,50 @@ esac`}
 	if err != nil {
 		t.Fatal(err)
 	}
-	saveGoal("m", Goal{Title: "both files", Checks: "test -f a.txt && test -f b.txt"})
-	if err := startGoal("m"); err != nil {
+	o.Store.SaveGoal("m", store.Goal{Title: "both files", Checks: "test -f a.txt && test -f b.txt"})
+	if err := o.Start("m"); err != nil {
 		t.Fatal(err)
 	}
-	if g := waitDone(t, "m"); g.Status != "done" {
-		es, _ := listEvents("m", 50)
+	if g := waitDone(t, o, "m"); g.Status != "done" {
+		es, _ := o.Store.Events("m", 50)
 		t.Fatalf("manager: %+v\nevents: %+v", g, es)
 	}
 	// children got their subgoals from the plan and finished
 	for _, id := range []string{"a", "b"} {
-		if g, _ := getGoal(id); g.Status != "done" || len(g.Base) != 40 {
+		if g, _ := o.Store.Goal(id); g.Status != "done" || len(g.Base) != 40 {
 			t.Fatalf("%s: %+v", id, g)
 		}
 	}
 	// a child's diff still shows its work after the manager merged it
-	ga, _ := getGoal("a")
-	if fs, err := worktreeDiff(filepath.Join(worktreeRoot, "a"), ga.Base); err != nil || len(fs) != 1 || fs[0].Path != "a.txt" {
+	ga, _ := o.Store.Goal("a")
+	if fs, err := git.Diff(o.Dir("a"), ga.Base); err != nil || len(fs) != 1 || fs[0].Path != "a.txt" {
 		t.Fatalf("a's diff after merge: %+v %v", fs, err)
 	}
 	// b was rejected once, so it ran twice; a ran once
 	var runsA, runsB int
-	db.QueryRow(`SELECT count(*) FROM runs WHERE agent_id='a'`).Scan(&runsA)
-	db.QueryRow(`SELECT count(*) FROM runs WHERE agent_id='b'`).Scan(&runsB)
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id='a'`).Scan(&runsA)
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id='b'`).Scan(&runsB)
 	if runsA != 1 || runsB != 2 {
 		t.Fatalf("runs a=%d b=%d", runsA, runsB)
 	}
 	// the manager's branch holds both files, and its decision calls left no edits behind
 	for _, f := range []string{"a.txt", "b.txt"} {
-		if _, err := git(repo, "cat-file", "-e", "arranger/m:"+f); err != nil {
+		if _, err := git.Run(repo, "cat-file", "-e", "arranger/m:"+f); err != nil {
 			t.Fatalf("%s not merged into the manager: %v", f, err)
 		}
 	}
-	if _, err := git(repo, "cat-file", "-e", "arranger/m:junk.txt"); err == nil {
+	if _, err := git.Run(repo, "cat-file", "-e", "arranger/m:junk.txt"); err == nil {
 		t.Fatal("manager's own file edits should be discarded")
 	}
 	var decisions int
-	db.QueryRow(`SELECT count(*) FROM decisions WHERE agent_id='m'`).Scan(&decisions)
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM decisions WHERE agent_id='m'`).Scan(&decisions)
 	if decisions != 3 { // plan + two reviews
 		t.Fatalf("decisions: %d", decisions)
 	}
 }
 
 func TestValidatePlan(t *testing.T) {
-	team := map[string]Agent{"a": {}, "b": {}}
+	team := map[string]store.Agent{"a": {}, "b": {}}
 	bad := [][]subgoal{
 		nil,
 		{{Agent: "zz", Title: "x", Checks: []string{"true"}}},
@@ -173,39 +171,35 @@ func TestValidatePlan(t *testing.T) {
 
 // Stopping a manager stops the children it's waiting on.
 func TestStopManagerStopsTeam(t *testing.T) {
-	data := t.TempDir()
-	worktreeRoot = filepath.Join(data, "worktrees")
-	if err := openDB(filepath.Join(data, "a.db")); err != nil {
-		t.Fatal(err)
-	}
-	plain := func(l []byte) []Event { return []Event{{Kind: "msg", Text: string(l)}} }
-	runtimes["fakemgr2"] = Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+	o := setup(t)
+	plain := func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} }
+	agents.Runtimes["fakemgr2"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
 		return []string{"-c", `cat >/dev/null; echo '{"subgoals":[{"agent":"s","title":"sleep","checks":["true"]}]}'`}
 	}}
-	runtimes["sleeper"] = Runtime{Bin: "sh", Parse: plain, Args: func(string) []string { return []string{"-c", "cat >/dev/null; sleep 30"} }}
-	defer delete(runtimes, "fakemgr2")
-	defer delete(runtimes, "sleeper")
+	agents.Runtimes["sleeper"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string { return []string{"-c", "cat >/dev/null; sleep 30"} }}
+	defer delete(agents.Runtimes, "fakemgr2")
+	defer delete(agents.Runtimes, "sleeper")
 
-	p, _ := createProject(Project{Name: "t", Repo: newRepo(t), Base: "main"})
-	saveArrangement(p.ID, []Agent{
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: newRepo(t), Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{
 		{ID: "m", Name: "M", Role: "manager", Runtime: "fakemgr2"},
 		{ID: "s", Name: "S", Role: "coder", Parent: "m", Runtime: "sleeper"},
 	})
-	saveGoal("m", Goal{Title: "x", Checks: "true"})
-	if err := startGoal("m"); err != nil {
+	o.Store.SaveGoal("m", store.Goal{Title: "x", Checks: "true"})
+	if err := o.Start("m"); err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(10 * time.Second); !isRunning("s"); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(10 * time.Second); !o.IsRunning("s"); time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("child never started")
 		}
 	}
 	start := time.Now()
-	stopGoal("m")
-	if g := waitDone(t, "m"); g.Status != "stopped" {
+	o.Stop("m")
+	if g := waitDone(t, o, "m"); g.Status != "stopped" {
 		t.Fatalf("manager: %+v", g)
 	}
-	if g, _ := getGoal("s"); g.Status != "stopped" {
+	if g, _ := o.Store.Goal("s"); g.Status != "stopped" {
 		t.Fatalf("child: %+v", g)
 	}
 	if time.Since(start) > 10*time.Second {
@@ -215,13 +209,9 @@ func TestStopManagerStopsTeam(t *testing.T) {
 
 // Soft limit warns once; hard limit kills the agent mid-run and fails the goal with a clear error.
 func TestTokenLimits(t *testing.T) {
-	data := t.TempDir()
-	worktreeRoot = filepath.Join(data, "worktrees")
-	if err := openDB(filepath.Join(data, "a.db")); err != nil {
-		t.Fatal(err)
-	}
+	o := setup(t)
 	// each assistant message reports 100 tokens; the same message repeated must not double count
-	runtimes["chatty"] = Runtime{Bin: "sh", Parse: parseClaude, Args: func(string) []string {
+	agents.Runtimes["chatty"] = agents.Runtime{Bin: "sh", Parse: agents.Runtimes["claude"].Parse, Args: func(string) []string {
 		return []string{"-c", `cat >/dev/null
 for i in 1 2 3 4 5; do
   echo '{"type":"assistant","message":{"id":"m'$i'","content":[{"type":"text","text":"step '$i'"}],"usage":{"input_tokens":90,"output_tokens":10}}}'
@@ -230,32 +220,63 @@ for i in 1 2 3 4 5; do
 done
 sleep 30`}
 	}}
-	defer delete(runtimes, "chatty")
+	defer delete(agents.Runtimes, "chatty")
 
-	p, _ := createProject(Project{Name: "t", Repo: newRepo(t), Base: "main"})
-	saveArrangement(p.ID, []Agent{{ID: "w", Name: "W", Role: "coder", Runtime: "chatty"}})
-	a, _, _ := getAgent("w")
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: newRepo(t), Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{{ID: "w", Name: "W", Role: "coder", Runtime: "chatty"}})
+	a, _, _ := o.Store.Agent("w")
 	a.Soft, a.Hard = 150, 300
-	updateAgent(a)
-	saveGoal("w", Goal{Title: "talk", Checks: "true"})
+	o.Store.UpdateAgent(a)
+	o.Store.SaveGoal("w", store.Goal{Title: "talk", Checks: "true"})
 	start := time.Now()
-	if err := startGoal("w"); err != nil {
+	if err := o.Start("w"); err != nil {
 		t.Fatal(err)
 	}
-	g := waitDone(t, "w")
+	g := waitDone(t, o, "w")
 	if g.Status != "failed" || !strings.Contains(g.Feedback, "hard limit of 300") {
 		t.Fatalf("goal: %+v", g)
 	}
 	if time.Since(start) > 10*time.Second {
 		t.Fatal("hard limit should stop the agent right away, not after it finishes")
 	}
-	s, _ := projectSummary(p.ID)
+	s, _ := o.Store.Summary(p.ID)
 	if st := s.Agents["w"]; st.Tokens != 300 || st.AllTokens != 300 {
 		t.Fatalf("tokens counted: %+v", st)
 	}
 	var warns int
-	db.QueryRow(`SELECT count(*) FROM events WHERE agent_id='w' AND kind='warn'`).Scan(&warns)
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM events WHERE agent_id='w' AND kind='warn'`).Scan(&warns)
 	if warns != 1 {
 		t.Fatalf("soft limit warnings: %d", warns)
 	}
+}
+
+// setup returns an orchestrator on a fresh database and worktree root.
+func setup(t *testing.T) *Orchestrator {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "a.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return New(st, filepath.Join(dir, "worktrees"), 4)
+}
+
+// newRepo makes a temp git repo on branch main with one committed file.
+func newRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("one\ntwo\n"), 0o644)
+	if _, err := git.Commit(repo, "a"); err != nil {
+		t.Fatal(err)
+	}
+	return repo
 }

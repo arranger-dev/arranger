@@ -1,4 +1,4 @@
-package main
+package agents
 
 import (
 	"bytes"
@@ -98,17 +98,17 @@ func TestParseOthers(t *testing.T) {
 }
 
 func TestCommand(t *testing.T) {
-	if _, err := runtimes["generic"].command(context.Background(), "", "", "x"); err == nil {
+	if _, err := Runtimes["generic"].Command(context.Background(), "", "", "x"); err == nil {
 		t.Error("generic without a command should fail")
 	}
-	cmd, err := runtimes["generic"].command(context.Background(), "", "sh -c cat", "hello")
+	cmd, err := Runtimes["generic"].Command(context.Background(), "", "sh -c cat", "hello")
 	if err != nil || cmd.Args[0] != "sh" {
 		t.Fatalf("generic: %v %v", cmd, err)
 	}
 	if out, _ := cmd.Output(); string(out) != "hello" {
 		t.Errorf("generic stdin: %q", out)
 	}
-	if cmd, err := runtimes["codex"].command(context.Background(), "o3", "--foo", "do it"); err == nil {
+	if cmd, err := Runtimes["codex"].Command(context.Background(), "o3", "--foo", "do it"); err == nil {
 		if got := strings.Join(cmd.Args[1:], " "); got != "exec --json --full-auto -m o3 --foo -" {
 			t.Errorf("codex args: %s", got)
 		}

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Arranger · {{.Project.Name}}</title>
+<link rel="icon" type="image/png" href="/arranger.png">
 <script>try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "light" } catch {}</script>
 <style>
 :root {
@@ -11,7 +12,7 @@
   --accent: #3d6fe0; --on-accent: #fff; --drop: #3d6fe01f;
   --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
   --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079;
-  --add-bg: #e6f4ea; --del-bg: #fdecec;
+  --add-bg: #e6f4ea; --del-bg: #fdecec; --link: #8b919c;
   font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
 }
 [data-theme=dark] {
@@ -19,7 +20,7 @@
   --accent: #7aa2f7; --on-accent: #0e0f12; --drop: #7aa2f733;
   --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a;
   --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98;
-  --add-bg: #1f2d22; --del-bg: #331f24;
+  --add-bg: #1f2d22; --del-bg: #331f24; --link: #6b7280;
 }
 * { box-sizing: border-box; border-radius: 0; }
 body { margin: 0; color: var(--text); background: var(--bg); display: grid; grid-template: auto 1fr / 180px 1fr auto; height: 100vh; overflow: hidden; }
@@ -39,7 +40,8 @@ label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px
 
 header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
 header h1 { font: 600 14px ui-monospace, monospace; margin: 0 8px 0 0; }
-header h1 a { color: inherit; text-decoration: none; }
+header h1 a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 8px; }
+header h1 img { width: 22px; height: 22px; display: block; }
 header select { width: auto; }
 .sp { flex: 1; }
 #bar { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--muted); }
@@ -58,8 +60,18 @@ header select { width: auto; }
 aside#palette { border-right: 1px solid var(--line); padding: 12px; overflow: auto; }
 h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 16px; }
-main { overflow: auto; padding: 32px; }
+main { overflow: auto; position: relative; }
 main.drop { background: var(--drop); }
+/* free-form canvas: boxes sit where you drop them; links are drawn between them */
+#canvas { position: relative; min-width: 100%; min-height: 100%; }
+#links { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+#links path { fill: none; stroke: var(--link); stroke-width: 2.5; stroke-dasharray: 2 7; stroke-linecap: round; }
+/* a working agent's link flows up toward its manager */
+#links path.flow { stroke: var(--s); stroke-width: 3.5; animation: flow .7s linear infinite; }
+@keyframes flow { to { stroke-dashoffset: 18; } }
+#canvas .card { position: absolute; display: grid; }
+#canvas .card.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 6px 18px #0002; }
+#tidy { position: sticky; float: right; top: 12px; right: 12px; margin: 12px; z-index: 4; }
 
 .card { position: relative; display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--panel); border: 1px solid var(--line);
   border-left: 3px solid var(--c, var(--accent)); padding: 10px 14px; cursor: grab; user-select: none; width: 210px; }
@@ -84,6 +96,7 @@ main.drop { background: var(--drop); }
 #bar .live { display: inline-block; width: 8px; height: 8px; background: var(--running); margin-right: 4px; vertical-align: middle; animation: pulse 1s infinite alternate; }
 #bar .live[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) {
+  #links path.flow { animation: none; }
   .card.busy::after { animation: none; background: var(--s); }
   .st::before, #bar .live { animation: none !important; }
 }
@@ -98,20 +111,6 @@ main.drop { background: var(--drop); }
 [data-role=reviewer] { --c: var(--reviewer); } [data-role=tester] { --c: var(--tester); }
 aside .card { display: grid; width: 100%; margin-bottom: 8px; }
 
-/* org-chart connectors */
-.tree ul { display: flex; justify-content: center; padding: 20px 0 0; margin: 0; position: relative; }
-.tree > ul { padding-top: 0; }
-.tree li { list-style: none; text-align: center; position: relative; padding: 20px 6px 0; }
-.tree > ul > li { padding-top: 0; }
-.tree li::before, .tree li::after { content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 20px; border-top: 1px solid var(--line); }
-.tree li::after { right: auto; left: 50%; border-left: 1px solid var(--line); }
-.tree li:only-child::before, .tree li:only-child::after { display: none; }
-.tree li:only-child { padding-top: 20px; }
-.tree > ul > li::before, .tree > ul > li::after { display: none; }
-.tree li:first-child::before, .tree li:last-child::after { border: 0; }
-.tree li:last-child::before { border-right: 1px solid var(--line); }
-.tree ul ul::before { content: ""; position: absolute; top: 0; left: 50%; height: 20px; border-left: 1px solid var(--line); }
-.tree ul:not(:has(li)) { display: none; }
 
 #inspector { width: var(--iw, min(560px, 45vw)); min-width: 320px; max-width: 85vw; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; position: relative; }
 #resize { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; z-index: 3; }
@@ -177,24 +176,33 @@ body.resizing { cursor: col-resize; user-select: none; }
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(460px, 92vw); }
 dialog::backdrop { background: #0006; }
 dialog h3 { margin: 0 0 4px; font-size: 15px; }
+#stats-dialog { width: min(820px, 94vw); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin: 12px 0; }
+.tiles div { background: var(--panel); border: 1px solid var(--line); padding: 10px 12px; }
+.tiles b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+.tiles span { font-size: 12px; color: var(--muted); }
+.tbl { overflow-x: auto; margin-bottom: 14px; }
+.tbl table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.tbl th, .tbl td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--sunk); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tbl th:first-child, .tbl td:first-child { text-align: left; }
+.tbl th { color: var(--muted); font-weight: 600; }
+.colorrow { display: flex; gap: 8px; align-items: center; }
+.colorrow input[type=color] { width: 44px; height: 32px; padding: 2px; }
+.colorrow button { white-space: nowrap; }
 </style>
 </head>
 <body data-project="{{.Project.ID}}">
-{{define "node"}}
-<li data-id="{{.ID}}">
-  <div class="card" draggable="true" data-role="{{.Role}}" data-status="idle">
-    <span class="name">{{.Name}}</span><span class="x" title="Remove">×</span>
-    <span class="meta"><span class="st"></span><span class="role">{{.Role}}</span> · <span class="rt">{{.Runtime}}</span></span>
+<template id="card-tpl">
+  <div class="card" data-status="idle">
+    <span class="name"></span><span class="x" title="Remove">×</span>
+    <span class="meta"><span class="st"></span><span class="role"></span> · <span class="rt"></span></span>
     <span class="now"></span>
     <span class="badges"></span>
   </div>
-  <ul>{{range .Children}}{{template "node" .}}{{end}}</ul>
-</li>
-{{end}}
-<template id="node-tpl">{{template "node" .Blank}}</template>
+</template>
 
 <header>
-  <h1><a href="/">arranger</a></h1>
+  <h1><a href="/"><img src="/arranger.png" alt="">arranger</a></h1>
   <select id="project" aria-label="Project">
     {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
   </select>
@@ -209,6 +217,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   </div>
   <span class="sp"></span>
   <span id="msg"></span>
+  <button id="stats" title="Cost, time and success across the project">Stats</button>
   <button id="theme" title="Toggle theme">◐</button>
   <button id="save">Save</button>
   <button id="run-all" class="primary">Run all</button>
@@ -222,11 +231,11 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
   <div id="custom-types"></div>
   <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
-  <p class="hint">Drag onto an agent to nest it. Drop on empty space for a new root. Double-click to rename. Click to open.</p>
+  <p class="hint">Drag a type onto the canvas to add an agent, or onto an agent to put it under that agent. Drag boxes to move them; drop one on another to change who it reports to. Double-click to rename.</p>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
 </aside>
 
-<main class="tree"><ul id="roots">{{range .Roots}}{{template "node" .}}{{end}}</ul></main>
+<main><button id="tidy" title="Lay the boxes out as a tree again">Tidy up</button><div id="canvas"><svg id="links"></svg></div></main>
 
 <aside id="inspector" hidden>
   <div id="resize" title="Drag to resize"></div>
@@ -273,6 +282,9 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <label>Runtime</label>
     <select name="runtime">{{range .Runtimes}}<option value="{{.}}">{{.}}{{if not (index $.Installed .)}} (not installed){{end}}</option>{{end}}</select>
     <label>Model (optional)</label><input name="model" placeholder="default">
+    <label>Reports to</label><select name="parent" id="a-parent"></select>
+    <label>Color</label>
+    <div class="colorrow"><input type="color" name="color" id="a-color"><button type="button" id="a-color-reset">Use role color</button></div>
     <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash  (generic: the whole command)">
     <label>Instructions</label><textarea name="prompt" rows="6" placeholder="How this agent should work"></textarea>
     <div class="pair">
@@ -331,9 +343,16 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   </form>
 </dialog>
 
+<dialog id="stats-dialog">
+  <form method="dialog">
+    <div class="row" style="margin:0"><h3 style="flex:1">Project stats</h3><button value="close">Close</button></div>
+    <div id="stats-body"></div>
+  </form>
+</dialog>
+
 <div id="stale" hidden>Arranger was restarted with new code. <button id="reload">Reload page</button></div>
 
-<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.BUILD = {{.Build}};</script>
+<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.AGENTS = {{.Agents}}; window.BUILD = {{.Build}};</script>
 <script src="/app.js"></script>
 </body>
 </html>

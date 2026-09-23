@@ -1,4 +1,6 @@
-package main
+// Package agents drives agent CLIs (claude, codex, gemini, pi, opencode, cursor, amp, or any
+// command) headlessly and normalizes their streamed output into Events.
+package agents
 
 import (
 	"context"
@@ -43,7 +45,7 @@ func withModel(flag string, base ...string) func(string) []string {
 	}
 }
 
-var runtimes = map[string]Runtime{
+var Runtimes = map[string]Runtime{
 	"claude":   {Bin: "claude", Args: withModel("--model", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"), Parse: parseClaude},
 	"codex":    {Bin: "codex", Args: withModel("-m", "exec", "--json", "--full-auto"), Tail: []string{"-"}, Parse: parseCodex},
 	"gemini":   {Bin: "gemini", Args: withModel("-m", "--output-format", "stream-json", "--approval-mode", "auto_edit"), Parse: parseGemini},
@@ -56,18 +58,18 @@ var runtimes = map[string]Runtime{
 	"generic": {Args: withModel(""), Parse: func(l []byte) []Event { return []Event{{Kind: "msg", Text: string(l)}} }},
 }
 
-// installedRuntimes reports which runtime CLIs are on PATH. generic is always available.
-func installedRuntimes() map[string]bool {
+// Installed reports which runtime CLIs are on PATH. generic is always available.
+func Installed() map[string]bool {
 	m := map[string]bool{}
-	for name, rt := range runtimes {
+	for name, rt := range Runtimes {
 		_, err := exec.LookPath(rt.Bin)
 		m[name] = rt.Bin == "" || err == nil
 	}
 	return m
 }
 
-// command builds the process for a run. extra is the agent's free-form args.
-func (rt Runtime) command(ctx context.Context, model, extra, prompt string) (*exec.Cmd, error) {
+// Command builds the process for a run. extra is the agent's free-form args.
+func (rt Runtime) Command(ctx context.Context, model, extra, prompt string) (*exec.Cmd, error) {
 	bin, args := rt.Bin, append(rt.Args(model), strings.Fields(extra)...)
 	if bin == "" {
 		if len(args) == 0 {
@@ -163,14 +165,14 @@ func parseClaude(line []byte) []Event {
 	case "user":
 		for _, c := range msg.Content {
 			if c.Type == "tool_result" && c.IsError {
-				es = append(es, Event{Kind: "error", Text: clip(rawText(c.Content), 300)})
+				es = append(es, Event{Kind: "error", Text: Clip(rawText(c.Content), 300)})
 			}
 		}
 	case "result":
 		u := m.Usage
 		e := Event{Kind: "done", Text: strings.TrimSpace(m.Result), Cost: m.Cost, In: u.In + u.CacheW + u.CacheR, Out: u.Out, ID: "total"}
 		if m.IsError || m.Subtype != "success" {
-			e.Kind, e.Text = "error", m.Subtype+": "+clip(m.Result+rawText(m.Error), 300)
+			e.Kind, e.Text = "error", m.Subtype+": "+Clip(m.Result+rawText(m.Error), 300)
 		}
 		es = append(es, e)
 	}
@@ -279,7 +281,7 @@ func parseGemini(line []byte) []Event {
 		return []Event{toolEvent(m.Tool, m.Params)}
 	case "tool_result":
 		if m.Status == "error" {
-			return []Event{{Kind: "error", Text: clip(m.ErrorObj.Message, 300)}}
+			return []Event{{Kind: "error", Text: Clip(m.ErrorObj.Message, 300)}}
 		}
 	case "error":
 		return []Event{{Kind: "error", Text: m.Message}}
@@ -327,7 +329,7 @@ func parsePi(line []byte) []Event {
 		return []Event{toolEvent(m.ToolName, m.Args)}
 	case "tool_execution_end":
 		if m.IsError {
-			return []Event{{Kind: "error", Text: clip(rawText(m.Result.Content), 300)}}
+			return []Event{{Kind: "error", Text: Clip(rawText(m.Result.Content), 300)}}
 		}
 	case "message_end":
 		msg := m.Message
@@ -388,7 +390,7 @@ func parseOpencode(line []byte) []Event {
 		}
 	case "tool_use":
 		if p.State.Status == "error" {
-			return []Event{toolEvent(p.Tool, p.State.Input), {Kind: "error", Text: clip(p.State.Error, 300)}}
+			return []Event{toolEvent(p.Tool, p.State.Input), {Kind: "error", Text: Clip(p.State.Error, 300)}}
 		}
 		return []Event{toolEvent(p.Tool, p.State.Input)}
 	case "step_finish":
@@ -405,7 +407,7 @@ func toolArg(raw json.RawMessage) string {
 	json.Unmarshal(raw, &in)
 	for _, k := range []string{"file_path", "filePath", "path", "command", "pattern", "url", "query", "description"} {
 		if v, ok := in[k].(string); ok {
-			return clip(v, 120)
+			return Clip(v, 120)
 		}
 	}
 	return ""
@@ -428,7 +430,8 @@ func rawText(raw json.RawMessage) string {
 	return b.String()
 }
 
-func clip(s string, n int) string {
+// Clip trims s and shortens it to n bytes, marking the cut.
+func Clip(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) > n {
 		return s[:n] + "…"
