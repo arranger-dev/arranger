@@ -277,9 +277,9 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 			rt = "claude"
 		}
 		// settings only apply to new agents (e.g. from a custom type); existing ones keep theirs
-		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt, color, x, y) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt, color, token_soft, token_hard, x, y) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, parent=excluded.parent, pos=excluded.pos, x=excluded.x, y=excluded.y`,
-			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt, a.Color, a.X, a.Y); err != nil {
+			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt, a.Color, a.Soft, a.Hard, a.X, a.Y); err != nil {
 			return err
 		}
 		keep[a.ID] = true

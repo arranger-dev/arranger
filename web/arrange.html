@@ -62,6 +62,7 @@ h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: v
 .hint { font-size: 12px; color: var(--muted); margin-top: 16px; }
 main { overflow: auto; position: relative; }
 main.drop { background: var(--drop); }
+main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 /* free-form canvas: boxes sit where you drop them; links are drawn between them */
 #canvas { position: relative; min-width: 100%; min-height: 100%; }
 #links { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
@@ -231,7 +232,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
   <div id="custom-types"></div>
   <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
-  <p class="hint">Drag a type onto the canvas to add an agent, or onto an agent to put it under that agent. Drag boxes to move them; drop one on another to change who it reports to. Double-click to rename.</p>
+  <p class="hint">Drag a type onto the canvas to add an agent, or onto an agent to put it under that agent. Drag boxes to move them, or empty space to pan; drop one on another to change who it reports to. Double-click to rename.</p>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
 </aside>
 
@@ -242,6 +243,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div class="ihead">
     <span class="st" id="i-status" data-status="idle"></span>
     <span class="name" id="i-name"></span>
+    <button id="i-clone" title="Add a copy of this agent (same settings and manager, no goal)">Clone</button>
     <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
     <button id="i-run" class="primary">Run</button>
     <button id="i-stop" class="danger">Stop</button>

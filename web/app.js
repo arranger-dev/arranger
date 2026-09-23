@@ -115,7 +115,8 @@ function drawLinks() {
     paths.push(path);
   }
   linksSvg.replaceChildren(...paths);
-  const cw = w + 320, ch = h + 320;
+  // room to spread out: the canvas always reaches well past the last box and the viewport
+  const cw = Math.max(w + 1200, main.clientWidth * 2), ch = Math.max(h + 900, main.clientHeight * 2);
   canvas.style.width = cw + "px";
   canvas.style.height = ch + "px";
   linksSvg.setAttribute("width", cw);
@@ -203,6 +204,18 @@ canvas.addEventListener("pointerdown", e => {
       dirty = true;
     } else markDirty();
     drawLinks();
+  };
+});
+// empty space: drag to pan, like draw.io
+main.addEventListener("pointerdown", e => {
+  if (e.button !== 0 || e.target.closest(".card, button")) return;
+  const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
+  try { main.setPointerCapture(e.pointerId); } catch {}
+  main.classList.add("panning");
+  main.onpointermove = m => { main.scrollLeft = sx - m.clientX; main.scrollTop = sy - m.clientY; };
+  main.onpointerup = main.onpointercancel = () => {
+    main.onpointermove = main.onpointerup = main.onpointercancel = null;
+    main.classList.remove("panning");
   };
 });
 canvas.addEventListener("click", e => {
@@ -349,8 +362,8 @@ $("#stats").onclick = async () => {
   const tiles = el("div", "tiles");
   [[`${s.done}/${s.goals}`, "goals done"], [pct(s.firstTry, s.done), "done on the first try"], [s.failed, "failed or blocked"],
    [s.runs, "agent runs"], [fmtDur(s.seconds * 1000), "agent time"], [fmtTok(s.tokens), "tokens"],
-   ["$" + s.cost.toFixed(2), "cost"], [s.done ? "$" + (s.cost / s.done).toFixed(2) : "–", "per finished goal"], [`+${s.adds} −${s.dels}`, "lines changed"]]
-    .forEach(([v, l]) => { const d = el("div"); d.append(el("b", "", v), el("span", "", l)); tiles.append(d); });
+   ["$" + s.cost.toFixed(2), "cost"], [s.done ? "$" + (s.cost / s.done).toFixed(2) : "–", "per finished goal"], [[el("b", "ok", "+" + s.adds), el("b", "bad", "−" + s.dels)], "lines changed"]]
+    .forEach(([v, l]) => { const d = el("div"); d.append(...(Array.isArray(v) ? v : [el("b", "", v)]), el("span", "", l)); tiles.append(d); });
   body.replaceChildren(tiles,
     el("h2", "", "By runtime"),
     table(["runtime", "agents", "runs", "done", "failed", "time", "tokens", "cost", "$ / done"],
@@ -512,6 +525,20 @@ $("#i-run").onclick = async () => {
     await api("POST", `/api/agents/${selected}/run`);
     say("started");
     showTab("logs");
+  } catch (e) { say(e.message, true); }
+};
+$("#i-clone").onclick = async () => {
+  try {
+    const { agent: src } = await api("GET", `/api/agents/${encodeURIComponent(selected)}`);
+    const s = agents.get(selected), parent = parentOf(selected) ?? "";
+    const { x, y } = parent ? slotUnder(parent) : { x: s.x + GAP_X, y: s.y };
+    const a = addAgent(s.role, src.name + " copy", null, x, y, parent);
+    Object.assign(a, { runtime: src.runtime, color: src.color,
+      defaults: { model: src.model, args: src.args, prompt: src.prompt, tokenSoft: src.tokenSoft, tokenHard: src.tokenHard } });
+    paintCard(a);
+    await save();
+    refreshCards();
+    select(a.id);
   } catch (e) { say(e.message, true); }
 };
 $("#i-stop").onclick = () => api("POST", `/api/agents/${selected}/stop`).catch(e => say(e.message, true));
@@ -774,7 +801,8 @@ async function refreshSummary() {
 }
 
 let summaryTimer = 0;
-const scheduleSummary = () => { clearTimeout(summaryTimer); summaryTimer = setTimeout(refreshSummary, 150); };
+// a throttle, not a debounce: busy agents send usage updates nonstop, which would keep postponing a debounced refresh
+const scheduleSummary = () => { summaryTimer ||= setTimeout(() => { summaryTimer = 0; refreshSummary(); }, 150); };
 
 // tick the "working for" timers without refetching anything
 setInterval(() => {

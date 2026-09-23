@@ -22,8 +22,7 @@ import (
 )
 
 // GitHubURL is linked from the landing page.
-// TODO: replace with the real repository once it's published.
-const GitHubURL = "https://github.com/your-org/arranger"
+const GitHubURL = "https://github.com/arranger-dev/arranger"
 
 type Server struct {
 	st    *store.Store
@@ -146,6 +145,9 @@ func validate(as []store.Agent) error {
 		}
 		if a.Color != "" && !colorRe.MatchString(a.Color) {
 			return fmt.Errorf("agent %s: color must look like #3d6fe0", a.Name)
+		}
+		if a.Soft < 0 || a.Hard < 0 || (a.Hard > 0 && a.Soft > a.Hard) {
+			return fmt.Errorf("agent %s: token limits must be 0 (none) or positive, soft below hard", a.Name)
 		}
 		if _, dup := parent[a.ID]; dup {
 			return errors.New("duplicate id " + a.ID)

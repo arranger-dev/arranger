@@ -45,12 +45,12 @@ func TestSaveArrangement(t *testing.T) {
 	x, y := 120.0, 40.0
 	if err := s.SaveArrangement(p.ID, []Agent{
 		{ID: "m", Name: "M", Role: "manager"},
-		{ID: "c", Name: "C", Role: "coder", Parent: "m", Model: "opus", Prompt: "from a type", Color: "#ff0000", X: &x, Y: &y},
+		{ID: "c", Name: "C", Role: "coder", Parent: "m", Model: "opus", Prompt: "from a type", Color: "#ff0000", Soft: 100, Hard: 200, X: &x, Y: &y},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	c, pid, err := s.Agent("c")
-	if err != nil || pid != p.ID || c.Runtime != "claude" || c.Model != "opus" || c.Color != "#ff0000" || *c.X != 120 || *c.Y != 40 {
+	if err != nil || pid != p.ID || c.Runtime != "claude" || c.Model != "opus" || c.Color != "#ff0000" || c.Soft != 100 || c.Hard != 200 || *c.X != 120 || *c.Y != 40 {
 		t.Fatalf("new agent: %+v %s %v", c, pid, err)
 	}
 	if m, _, _ := s.Agent("m"); m.X != nil {
