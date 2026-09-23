@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -38,7 +40,7 @@ func TestParseCodex(t *testing.T) {
 		{Kind: "tool", Text: "$ bash -lc ls"},
 		{Kind: "file", Text: "add a.txt"},
 		{Kind: "msg", Text: "Created a.txt."},
-		{Kind: "done", In: 1200, Out: 40},
+		{Kind: "usage", In: 1200, Out: 40},
 		{Kind: "error", Text: "stream disconnected"},
 	}
 	if !reflect.DeepEqual(es, want) {
@@ -49,5 +51,66 @@ func TestParseCodex(t *testing.T) {
 func TestParseGarbage(t *testing.T) {
 	if es := parseClaude([]byte("not json")); len(es) != 1 || es[0].Kind != "msg" {
 		t.Fatalf("got %+v", es)
+	}
+}
+
+func TestParseOthers(t *testing.T) {
+	cases := map[string]struct {
+		parse func([]byte) []Event
+		want  []Event
+	}{
+		"opencode": {parseOpencode, []Event{
+			{Kind: "file", Text: "write a.txt"},
+			{Kind: "usage", In: 9811, Out: 83},
+			{Kind: "msg", Text: "done"},
+			{Kind: "usage", In: 8256, Out: 3},
+		}},
+		"pi": {parsePi, []Event{
+			{Kind: "file", Text: "write a.txt"},
+			{Kind: "error", Text: "command not found"},
+			{Kind: "usage", In: 900, Out: 12, Cost: 0.004},
+			{Kind: "msg", Text: "done"},
+		}},
+		"gemini": {parseGemini, []Event{
+			{Kind: "file", Text: "write_file a.txt"},
+			{Kind: "error", Text: "denied"},
+			{Kind: "delta", Text: "Created "},
+			{Kind: "delta", Text: "a.txt."},
+			{Kind: "usage", In: 1200, Out: 100},
+		}},
+		"cursor": {parseCursor, []Event{
+			{Kind: "msg", Text: "Creating the file."},
+			{Kind: "file", Text: "write a.txt"},
+			{Kind: "tool", Text: "shell ls"},
+			{Kind: "done", Text: "Created a.txt."},
+		}},
+	}
+	for name, c := range cases {
+		if es := parseFile(t, "testdata/"+name+".jsonl", c.parse); !reflect.DeepEqual(es, c.want) {
+			t.Errorf("%s:\ngot  %+v\nwant %+v", name, es, c.want)
+		}
+	}
+	// amp speaks Claude's format; its failures carry the reason in "error"
+	es := parseFile(t, "testdata/amp.jsonl", parseClaude)
+	if len(es) != 1 || es[0].Kind != "error" || !strings.Contains(es[0].Text, "no longer supported") {
+		t.Errorf("amp: %+v", es)
+	}
+}
+
+func TestCommand(t *testing.T) {
+	if _, err := runtimes["generic"].command(context.Background(), "", "", "x"); err == nil {
+		t.Error("generic without a command should fail")
+	}
+	cmd, err := runtimes["generic"].command(context.Background(), "", "sh -c cat", "hello")
+	if err != nil || cmd.Args[0] != "sh" {
+		t.Fatalf("generic: %v %v", cmd, err)
+	}
+	if out, _ := cmd.Output(); string(out) != "hello" {
+		t.Errorf("generic stdin: %q", out)
+	}
+	if cmd, err := runtimes["codex"].command(context.Background(), "o3", "--foo", "do it"); err == nil {
+		if got := strings.Join(cmd.Args[1:], " "); got != "exec --json --full-auto -m o3 --foo -" {
+			t.Errorf("codex args: %s", got)
+		}
 	}
 }

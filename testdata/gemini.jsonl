@@ -1,0 +1,8 @@
+{"type":"init","session_id":"s1","model":"gemini-2.5-pro"}
+{"type":"message","role":"user","content":"Create a.txt"}
+{"type":"tool_use","tool_name":"write_file","tool_id":"t1","parameters":{"file_path":"a.txt","content":"hi"}}
+{"type":"tool_result","tool_id":"t1","status":"success","output":"ok"}
+{"type":"tool_result","tool_id":"t2","status":"error","error":{"type":"x","message":"denied"}}
+{"type":"message","role":"assistant","content":"Created ","delta":true}
+{"type":"message","role":"assistant","content":"a.txt.","delta":true}
+{"type":"result","status":"success","stats":{"total_tokens":1300,"input_tokens":1200,"output_tokens":100}}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -31,9 +32,17 @@ CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, agent_id TEXT NOT NULL, ts INTEGER NOT NULL,
   kind TEXT NOT NULL, text TEXT NOT NULL, raw TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS events_agent ON events(agent_id, id);
--- a crash mid-run leaves stale statuses behind
-UPDATE goals SET status = 'stopped' WHERE status IN ('running', 'verifying');
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL);
 `
+
+// migrations add columns to tables created by older versions; "duplicate column" errors are expected.
+var migrations = []string{
+	`ALTER TABLE goals ADD COLUMN base TEXT NOT NULL DEFAULT ''`,  // branch the agent's work is diffed against
+	`ALTER TABLE goals ADD COLUMN notes TEXT NOT NULL DEFAULT ''`, // changes the user removed; the agent must not re-add them
+	// a crash mid-run leaves stale statuses behind
+	`UPDATE goals SET status = 'stopped' WHERE status IN ('running', 'verifying', 'planning', 'waiting', 'reviewing')`,
+}
 
 type Project struct {
 	ID   string `json:"id"`
@@ -65,6 +74,8 @@ type Goal struct {
 	Total    int    `json:"total"`
 	Adds     int    `json:"adds"`
 	Dels     int    `json:"dels"`
+	Base     string `json:"base"`
+	Notes    string `json:"notes"`
 }
 
 var demoAgents = []Agent{
@@ -89,6 +100,9 @@ func openDB(path string) error {
 	db.SetMaxOpenConns(1) // ponytail: one writer connection, enough for a local tool
 	if _, err = db.Exec(schema); err != nil {
 		return err
+	}
+	for _, m := range migrations {
+		db.Exec(m)
 	}
 	var n int
 	db.QueryRow(`SELECT count(*) FROM projects`).Scan(&n)
@@ -155,8 +169,13 @@ func scanAgent(s interface{ Scan(...any) error }) (a Agent, err error) {
 	return
 }
 
-func listAgents(projectID string) ([]Agent, error) {
-	rows, err := db.Query(`SELECT `+agentCols+` FROM agents WHERE project_id=? ORDER BY pos`, projectID)
+func listAgents(projectID string) ([]Agent, error) { return queryAgents("project_id", projectID) }
+
+func listChildren(agentID string) ([]Agent, error) { return queryAgents("parent", agentID) }
+
+// queryAgents returns agents where col = v, in tree order; col must be a trusted column name.
+func queryAgents(col, v string) ([]Agent, error) {
+	rows, err := db.Query(`SELECT `+agentCols+` FROM agents WHERE `+col+`=? ORDER BY pos`, v)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +191,13 @@ func listAgents(projectID string) ([]Agent, error) {
 	return as, rows.Err()
 }
 
-// getAgent returns the agent and its project id.
+func addDecision(agentID, kind string, v any) {
+	b, _ := json.Marshal(v)
+	if _, err := db.Exec(`INSERT INTO decisions(agent_id, ts, kind, json) VALUES(?,?,?,?)`, agentID, time.Now().UnixMilli(), kind, string(b)); err != nil {
+		log.Printf("addDecision: %v", err)
+	}
+}
+
 func getAgent(id string) (a Agent, pid string, err error) {
 	err = db.QueryRow(`SELECT `+agentCols+`, project_id FROM agents WHERE id=?`, id).
 		Scan(&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &pid)
@@ -236,8 +261,8 @@ func saveArrangement(projectID string, as []Agent) error {
 }
 
 func getGoal(agentID string) (g Goal, err error) {
-	err = db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels FROM goals WHERE agent_id=?`, agentID).
-		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels)
+	err = db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes FROM goals WHERE agent_id=?`, agentID).
+		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes)
 	if err == sql.ErrNoRows {
 		return Goal{Status: "idle"}, nil
 	}
@@ -251,8 +276,9 @@ func saveGoal(agentID string, g Goal) error {
 	return err
 }
 
-// setGoal updates run-time fields of a goal; col must be a trusted column name.
+// setGoal updates run-time fields of a goal, creating the row if needed; cols must be trusted names.
 func setGoal(agentID string, kv map[string]any) {
+	db.Exec(`INSERT OR IGNORE INTO goals(agent_id) VALUES(?)`, agentID)
 	for col, v := range kv {
 		if _, err := db.Exec(`UPDATE goals SET `+col+`=? WHERE agent_id=?`, v, agentID); err != nil {
 			log.Printf("setGoal %s: %v", col, err)

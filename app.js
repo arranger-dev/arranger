@@ -166,7 +166,15 @@ async function select(id) {
   showTab(tab);
 }
 
+const BUSY = ["running", "verifying", "planning", "waiting", "reviewing"];
+const NEEDS = ["failed", "blocked"];
+
 function showGoalState(g) {
+  const li = cardOf(selected)?.parentElement, mgr = parentOf(selected);
+  $("#g-hint").textContent = li?.querySelector(":scope > ul > li")
+    ? "Manager: Run plans subgoals for its team, runs them in parallel, reviews and merges their work, then runs these checks on the result."
+    : mgr ? `${cardOf(mgr).querySelector(".name").textContent} sets this goal when it plans; editing it here is fine, but the next plan replaces it.` : "";
+  $("#i-status").classList.toggle("busy", BUSY.includes(g.status));
   $("#i-status").dataset.status = g.status;
   $("#g-state").textContent = g.title ? `${g.status}` + (g.attempts ? ` · attempt ${g.attempts}/3` : "") + (g.total ? ` · checks ${g.passed}/${g.total}` : "") : "";
   $("#g-feedback").hidden = !g.feedback;
@@ -265,25 +273,48 @@ function appendLive(e) {
   });
 }
 
-/* ---------- diff ---------- */
+/* ---------- diff: select hunks to remove or promote; revert checkpoints ---------- */
+
+const parentOf = id => cardOf(id)?.parentElement.parentElement.closest("li")?.dataset.id;
+const selectedHunks = () => $$("#diff .hunk .hh input:checked").map(c => c.dataset.id);
+
+function updateSelection() {
+  $$("#diff .file").forEach(f => {
+    const boxes = $$(".hunk .hh input", f), on = boxes.filter(b => b.checked).length;
+    const all = $("summary input", f);
+    all.checked = on > 0 && on === boxes.length;
+    all.indeterminate = on > 0 && on < boxes.length;
+  });
+  const n = selectedHunks().length;
+  $("#n-sel").textContent = n;
+  $("#h-remove").disabled = $("#h-promote").disabled = n === 0;
+}
 
 async function loadDiff() {
   if (!selected) return;
   const out = $("#diff");
-  let files;
-  try { files = await api("GET", `/api/agents/${selected}/diff`); }
-  catch (e) { out.replaceChildren(el("div", "empty bad", e.message)); return; }
+  let files, cps;
+  try {
+    [files, cps] = await Promise.all([api("GET", `/api/agents/${selected}/diff`), api("GET", `/api/agents/${selected}/checkpoints`)]);
+  } catch (e) { out.replaceChildren(el("div", "empty bad", e.message)); return; }
   let adds = 0, dels = 0;
   const nodes = files.map(f => {
     adds += f.adds; dels += f.dels;
     const d = el("details", "file");
     d.open = true;
-    const sum = el("summary");
-    sum.append(el("span", "", f.path), el("span", "ok", "+" + f.adds), el("span", "bad", "−" + f.dels));
+    const sum = el("summary"), all = el("input");
+    all.type = "checkbox";
+    all.title = "Select the whole file";
+    all.onchange = () => { $$(".hunk .hh input", d).forEach(b => b.checked = all.checked); updateSelection(); };
+    sum.append(all, el("span", "", f.path), el("span", "ok", "+" + f.adds), el("span", "bad", "−" + f.dels));
     d.append(sum);
-    for (const h of f.hunks) {
-      const hk = el("div", "hunk");
-      hk.append(el("div", "hh", h.header));
+    for (const h of f.hunks ?? []) {
+      const hk = el("div", "hunk"), hh = el("div", "hh"), box = el("input");
+      box.type = "checkbox";
+      box.dataset.id = h.id;
+      box.onchange = updateSelection;
+      hh.append(box, el("span", "", h.header));
+      hk.append(hh);
       for (const l of h.lines ?? []) hk.append(el("div", "l" + (l[0] === "+" ? " a" : l[0] === "-" ? " d" : ""), l));
       d.append(hk);
     }
@@ -291,7 +322,33 @@ async function loadDiff() {
   });
   $("#diff-stat").textContent = files.length ? `${files.length} file${files.length > 1 ? "s" : ""} · +${adds} −${dels}` : "";
   out.replaceChildren(...(nodes.length ? nodes : [el("div", "empty", "No changes yet.")]));
+  $("#diff-actions").hidden = !files.length;
+  const mgr = parentOf(selected);
+  $("#h-promote").hidden = !mgr;
+  if (mgr) $("#h-promote").textContent = "Promote to " + cardOf(mgr).querySelector(".name").textContent;
+  updateSelection();
+
+  $("#checkpoints").replaceChildren(...(cps.length ? cps.map(c => {
+    const row = el("div", "cp"), btn = el("button", "", "Revert");
+    btn.title = "Undo this checkpoint with a new commit";
+    btn.onclick = () => hunkAction(() => api("POST", `/api/agents/${selected}/revert`, { sha: c.sha }), "reverted " + c.sha);
+    row.append(el("span", "t", c.sha), el("span", "", c.subject), el("span", "t", time(c.time * 1000)), btn);
+    return row;
+  }) : [el("div", "empty", "No checkpoints yet.")]));
 }
+
+async function hunkAction(call, done) {
+  try { await call(); say(done); } catch (e) { say(e.message, true); }
+  loadDiff();
+}
+$("#h-remove").onclick = () => {
+  const ids = selectedHunks();
+  hunkAction(() => api("POST", `/api/agents/${selected}/hunks`, { action: "remove", ids }), `removed ${ids.length} change(s)`);
+};
+$("#h-promote").onclick = () => {
+  const ids = selectedHunks();
+  hunkAction(() => api("POST", `/api/agents/${selected}/hunks`, { action: "promote", ids }), `promoted ${ids.length} change(s)`);
+};
 $("#diff-refresh").onclick = loadDiff;
 
 /* ---------- status: cards + top bar ---------- */
@@ -302,6 +359,7 @@ function refreshCards() {
   for (const li of $$("li", roots)) {
     const card = li.querySelector(".card"), st = summary.agents[li.dataset.id];
     card.dataset.status = st?.status ?? "idle";
+    card.classList.toggle("busy", BUSY.includes(card.dataset.status));
     card.querySelector(".now").textContent = st?.now || (st?.title ? "goal: " + st.title : "no goal yet");
     const b = card.querySelector(".badges");
     b.replaceChildren();
@@ -317,16 +375,16 @@ async function refreshSummary() {
   const all = Object.entries(summary.agents);
   const goals = all.filter(([, s]) => s.title);
   const done = goals.filter(([, s]) => s.status === "done").length;
-  const needs = all.filter(([, s]) => s.status === "failed");
+  const needs = all.filter(([, s]) => NEEDS.includes(s.status));
   $("#n-done").textContent = done;
   $("#n-goals").textContent = goals.length;
-  $("#n-running").textContent = all.filter(([, s]) => s.status === "running" || s.status === "verifying").length;
+  $("#n-running").textContent = all.filter(([, s]) => BUSY.includes(s.status)).length;
   $("#bar .prog i").style.width = goals.length ? (100 * done / goals.length) + "%" : 0;
   $("#cost").textContent = summary.cost.toFixed(2);
   $("#n-needs").textContent = needs.length;
   $("#needs").dataset.n = needs.length;
   $("#needs ul").replaceChildren(...needs.map(([id, s]) => {
-    const li = el("li", "", `✗ ${cardOf(id)?.querySelector(".name").textContent ?? id}: ${s.title}`);
+    const li = el("li", "", `✗ ${cardOf(id)?.querySelector(".name").textContent ?? id}: ${s.status} · ${s.title}`);
     li.onclick = () => { $("#needs").open = false; select(id); };
     return li;
   }));
@@ -353,7 +411,7 @@ es.onmessage = m => {
     if (e.agent === selected && tab === "logs") appendLive(e);
   } else if (msg.type === "status") {
     scheduleSummary();
-    if (msg.agent === selected && tab === "diff") loadDiff();
+    if (msg.agent === selected && tab === "diff" && !selectedHunks().length) loadDiff(); // don't wipe a selection in progress
   }
 };
 

@@ -258,7 +258,7 @@ func stopH(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// runAllH starts every agent in the project that has a goal. Agents without one are skipped.
+// runAllH starts every top-level agent that has a goal; managers run their own subtrees.
 func runAllH(w http.ResponseWriter, r *http.Request) {
 	as, err := listAgents(r.PathValue("id"))
 	if err != nil {
@@ -267,7 +267,7 @@ func runAllH(w http.ResponseWriter, r *http.Request) {
 	}
 	started, errs := 0, []string{}
 	for _, a := range as {
-		if g, _ := getGoal(a.ID); g.Title == "" {
+		if g, _ := getGoal(a.ID); a.Parent != "" || g.Title == "" {
 			continue
 		}
 		if err := startGoal(a.ID); err != nil {
@@ -288,28 +288,178 @@ func eventsH(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, es)
 }
 
-func diffH(w http.ResponseWriter, r *http.Request) {
-	_, pid, err := getAgent(r.PathValue("id"))
+// agentWork loads the agent named in the path along with its project, goal and worktree.
+// dir is "" when the agent has never run.
+func agentWork(w http.ResponseWriter, r *http.Request) (a Agent, p Project, g Goal, dir string, ok bool) {
+	a, pid, err := getAgent(r.PathValue("id"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, "agent not found", http.StatusNotFound)
 		return
 	}
-	p, err := getProject(pid)
+	if p, err = getProject(pid); err == nil {
+		g, err = getGoal(a.ID)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	dir := filepath.Join(worktreeRoot, r.PathValue("id"))
+	if g.Base == "" {
+		g.Base = p.Base
+	}
+	dir = filepath.Join(worktreeRoot, a.ID)
 	if _, err := os.Stat(dir); err != nil {
+		dir = ""
+	}
+	return a, p, g, dir, true
+}
+
+func diffH(w http.ResponseWriter, r *http.Request) {
+	_, _, g, dir, ok := agentWork(w, r)
+	if !ok {
+		return
+	}
+	if dir == "" {
 		writeJSON(w, []FileDiff{}) // never ran, so no changes yet
 		return
 	}
-	fs, err := worktreeDiff(dir, p.Base)
+	fs, err := worktreeDiff(dir, g.Base)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, fs)
+}
+
+func checkpointsH(w http.ResponseWriter, r *http.Request) {
+	_, _, g, dir, ok := agentWork(w, r)
+	if !ok {
+		return
+	}
+	if dir == "" {
+		writeJSON(w, []Checkpoint{})
+		return
+	}
+	cs, err := checkpoints(dir, g.Base)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, cs)
+}
+
+var shaRe = regexp.MustCompile(`^[0-9a-f]{4,40}$`)
+
+// editable loads an agent whose worktree the user may change: it has run, and isn't running now.
+func editable(w http.ResponseWriter, r *http.Request) (a Agent, p Project, g Goal, dir string, ok bool) {
+	if a, p, g, dir, ok = agentWork(w, r); !ok {
+		return
+	}
+	if dir == "" {
+		http.Error(w, a.Name+" has no work yet", http.StatusBadRequest)
+		return a, p, g, dir, false
+	}
+	if isRunning(a.ID) {
+		http.Error(w, "stop "+a.Name+" before changing its work", http.StatusConflict)
+		return a, p, g, dir, false
+	}
+	return a, p, g, dir, true
+}
+
+// changed recomputes an agent's diff stat and tells the UI.
+func changed(p Project, a Agent, dir, base string) {
+	refreshDiff(a.ID, dir, base)
+	g, _ := getGoal(a.ID)
+	hub.publish(p.ID, map[string]any{"type": "status", "agent": a.ID, "status": g.Status})
+}
+
+func revertH(w http.ResponseWriter, r *http.Request) {
+	a, p, g, dir, ok := editable(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ SHA string }
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if !shaRe.MatchString(req.SHA) {
+		http.Error(w, "bad commit id", http.StatusBadRequest)
+		return
+	}
+	if err := revertCommit(dir, req.SHA); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	changed(p, a, dir, g.Base)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// hunksH removes the selected hunks from the agent's work, or promotes them into its manager's work.
+func hunksH(w http.ResponseWriter, r *http.Request) {
+	a, p, g, dir, ok := editable(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Action string
+		IDs    []string
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ids := map[string]bool{}
+	for _, id := range req.IDs {
+		ids[id] = true
+	}
+	fs, err := worktreeDiff(dir, g.Base)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	patch, n := hunkPatch(fs, ids)
+	if n == 0 || n != len(ids) {
+		http.Error(w, "the diff changed since you loaded it; refresh and select again", http.StatusConflict)
+		return
+	}
+	switch req.Action {
+	case "remove":
+		if _, err := gitIn(dir, patch, "apply", "-R", "-"); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		checkpoint(dir, fmt.Sprintf("arranger: user removed %d change(s)", n))
+		notes := g.Notes + patch
+		if len(notes) > 8000 { // keep the newest removals; the prompt shouldn't grow without bound
+			notes = notes[len(notes)-8000:]
+		}
+		setGoal(a.ID, map[string]any{"notes": notes})
+		changed(p, a, dir, g.Base)
+	case "promote":
+		mgr, _, err := getAgent(a.Parent)
+		if a.Parent == "" || err != nil {
+			http.Error(w, a.Name+" has no manager to promote to", http.StatusBadRequest)
+			return
+		}
+		if isRunning(mgr.ID) {
+			http.Error(w, "stop "+mgr.Name+" before changing its work", http.StatusConflict)
+			return
+		}
+		mdir, mb, err := workspace(p, mgr)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := gitIn(mdir, patch, "apply", "--check", "-"); err != nil {
+			http.Error(w, "doesn't apply cleanly to "+mgr.Name+"'s work: "+err.Error(), http.StatusConflict)
+			return
+		}
+		gitIn(mdir, patch, "apply", "-")
+		checkpoint(mdir, fmt.Sprintf("arranger: promote %d change(s) from %s", n, a.Name))
+		changed(p, mgr, mdir, mb)
+	default:
+		http.Error(w, "action must be remove or promote", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func summaryH(w http.ResponseWriter, r *http.Request) {
@@ -365,7 +515,9 @@ func main() {
 	home, _ := os.UserHomeDir()
 	addr := flag.String("addr", "127.0.0.1:7777", "listen address")
 	data := flag.String("data", filepath.Join(home, ".arranger"), "data directory")
+	parallel := flag.Int("parallel", 4, "max agent processes running at once")
 	flag.Parse()
+	slots = make(chan struct{}, max(1, *parallel))
 	worktreeRoot = filepath.Join(*data, "worktrees")
 	if err := openDB(filepath.Join(*data, "arranger.db")); err != nil {
 		log.Fatal(err)
@@ -386,6 +538,9 @@ func main() {
 	http.HandleFunc("POST /api/agents/{id}/stop", stopH)
 	http.HandleFunc("GET /api/agents/{id}/events", eventsH)
 	http.HandleFunc("GET /api/agents/{id}/diff", diffH)
+	http.HandleFunc("GET /api/agents/{id}/checkpoints", checkpointsH)
+	http.HandleFunc("POST /api/agents/{id}/revert", revertH)
+	http.HandleFunc("POST /api/agents/{id}/hunks", hunksH)
 	http.HandleFunc("GET /api/events", sseH)
 
 	host, _, _ := net.SplitHostPort(*addr)

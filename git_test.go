@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,82 @@ func TestWorktreeDiff(t *testing.T) {
 	// base branch untouched
 	if out, _ := git(repo, "show", "main:a.txt"); out != "one\ntwo\n" {
 		t.Fatalf("base changed: %q", out)
+	}
+}
+
+func TestHunksRevertMerge(t *testing.T) {
+	repo := newRepo(t)
+	root := t.TempDir()
+	mgr, err := ensureWorktree(root, repo, "main", "mgr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid, err := ensureWorktree(root, repo, branchOf("mgr"), "kid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// two separate hunks in a.txt plus a new file
+	os.WriteFile(filepath.Join(repo, "a.txt"), nil, 0o644)
+	body := "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
+	os.WriteFile(filepath.Join(kid, "a.txt"), []byte(body), 0o644)
+	checkpoint(kid, "base content")
+	git(mgr, append(identity, "merge", "-q", branchOf("kid"))...) // manager starts from the same content
+	os.WriteFile(filepath.Join(kid, "a.txt"), []byte("ONE\n"+body[2:len(body)-3]+"TWELVE\n"), 0o644)
+	os.WriteFile(filepath.Join(kid, "new.txt"), []byte("new\n"), 0o644)
+	first, _ := checkpoint(kid, "attempt 1")
+
+	fs, _ := worktreeDiff(kid, branchOf("mgr"))
+	if len(fs) != 2 || len(fs[0].Hunks) != 2 {
+		t.Fatalf("want a.txt with 2 hunks + new.txt, got %+v", fs)
+	}
+
+	// promote only the first hunk of a.txt to the manager
+	patch, n := hunkPatch(fs, map[string]bool{fs[0].Hunks[0].ID: true})
+	if n != 1 {
+		t.Fatal("patch should hold one hunk")
+	}
+	if _, err := gitIn(mgr, patch, "apply", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(mgr, "a.txt")); !strings.HasPrefix(string(b), "ONE\n") || strings.Contains(string(b), "TWELVE") {
+		t.Fatalf("promote applied wrong content: %q", b)
+	}
+
+	// remove the new file and the second hunk from the kid's work
+	patch, _ = hunkPatch(fs, map[string]bool{fs[0].Hunks[1].ID: true, fs[1].Hunks[0].ID: true})
+	if _, err := gitIn(kid, patch, "apply", "-R", "-"); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint(kid, "removed")
+	fs, _ = worktreeDiff(kid, branchOf("mgr"))
+	if len(fs) != 1 || len(fs[0].Hunks) != 1 || fs[0].Adds != 1 {
+		t.Fatalf("after remove: %+v", fs)
+	}
+
+	cs, err := checkpoints(kid, branchOf("mgr"))
+	if err != nil || len(cs) != 2 || cs[0].Subject != "removed" {
+		t.Fatalf("checkpoints: %+v %v", cs, err)
+	}
+	// reverting the first attempt conflicts with the later removal commit; it must abort cleanly
+	if err := revertCommit(kid, first); err == nil {
+		t.Log("revert applied cleanly")
+	}
+	if out, _ := git(kid, "status", "--porcelain"); out != "" {
+		t.Fatalf("worktree left dirty: %q", out)
+	}
+	if err := revertCommit(kid, cs[0].SHA); err != nil {
+		t.Fatalf("revert of latest checkpoint: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(kid, "new.txt")); err != nil {
+		t.Fatal("reverting the removal should bring new.txt back")
+	}
+
+	// merge the kid into the manager
+	checkpoint(mgr, "promoted")
+	if err := mergeBranch(mgr, branchOf("kid"), "merge kid"); err != nil {
+		t.Logf("merge conflicted as expected with the promoted hunk: %v", err)
+		if out, _ := git(mgr, "status", "--porcelain"); out != "" {
+			t.Fatalf("aborted merge left the manager dirty: %q", out)
+		}
 	}
 }

@@ -70,10 +70,11 @@ main.drop { background: var(--drop); }
 .card .badges { display: flex; gap: 8px; }
 .card .badges:empty { display: none; }
 .st::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: var(--s, var(--idle)); }
-[data-status=running] .st::before, [data-status=verifying] .st::before, .st[data-status=running]::before, .st[data-status=verifying]::before { animation: pulse 1s infinite alternate; }
+.busy .st::before, .st.busy::before { animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .3; } }
 [data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
-[data-status=failed] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
+[data-status=failed], [data-status=blocked] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
+[data-status=planning], [data-status=waiting], [data-status=reviewing] { --s: var(--manager); }
 .ok { color: var(--done); } .bad { color: var(--failed); }
 [data-role=manager] { --c: var(--manager); } [data-role=coder] { --c: var(--coder); }
 [data-role=reviewer] { --c: var(--reviewer); } [data-role=tester] { --c: var(--tester); }
@@ -126,6 +127,11 @@ aside .card { display: grid; width: 100%; margin-bottom: 8px; }
 .hunk div.l { white-space: pre; padding: 0 10px; }
 .hunk .a { background: var(--add-bg); } .hunk .d { background: var(--del-bg); }
 .empty { color: var(--muted); padding: 20px 0; }
+.file summary input, .hunk .hh input { width: auto; margin: 0 6px 0 0; vertical-align: middle; }
+.hunk .hh { display: flex; align-items: center; }
+.cp { display: grid; grid-template-columns: 64px 1fr auto auto; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--sunk); font: 12px ui-monospace, monospace; }
+.cp .t { color: var(--muted); }
+#log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
 
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(440px, 92vw); }
 dialog::backdrop { background: #0006; }
@@ -195,6 +201,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <label>Details</label><textarea name="body" placeholder="Context the agent needs"></textarea>
     <label>Acceptance criteria</label><textarea name="criteria" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
     <label>Checks: one shell command per line, all must exit 0</label><textarea name="checks" class="mono" placeholder="go test ./..."></textarea>
+    <p id="g-hint" class="hint"></p>
     <div id="g-feedback" hidden><label>Last failure</label><div class="feedback mono"></div></div>
     <div class="row"><button class="primary">Save goal</button><span id="g-state" class="hint" style="margin:0"></span></div>
   </form>
@@ -204,14 +211,21 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   </div>
   <div class="pane" data-pane="diff" hidden>
     <div class="row"><span id="diff-stat" class="hint" style="margin:0;flex:1"></span><button id="diff-refresh">Refresh</button></div>
+    <div class="row" id="diff-actions" hidden>
+      <span class="hint" style="margin:0;flex:1"><b id="n-sel">0</b> selected</span>
+      <button id="h-remove" class="danger" title="Undo these changes in this agent's work; it won't re-add them">Remove</button>
+      <button id="h-promote" title="Copy these changes into the manager's work">Promote to manager</button>
+    </div>
     <div id="diff"></div>
+    <h2 style="margin-top:20px">Checkpoints</h2>
+    <div id="checkpoints"></div>
   </div>
   <form class="pane" data-pane="settings" id="agent-form" hidden>
     <label>Name</label><input name="name" required>
     <label>Runtime</label>
     <select name="runtime">{{range .Runtimes}}<option value="{{.}}">{{.}}{{if not (index $.Installed .)}} (not installed){{end}}</option>{{end}}</select>
     <label>Model (optional)</label><input name="model" placeholder="default">
-    <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash">
+    <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash  (generic: the whole command)">
     <label>Instructions</label><textarea name="prompt" rows="6" placeholder="How this agent should work"></textarea>
     <div class="row"><button class="primary">Save settings</button></div>
   </form>

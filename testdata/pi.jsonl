@@ -1,0 +1,9 @@
+{"type":"session","version":3,"id":"s1","timestamp":"2026-09-23T09:32:37.927Z","cwd":"/w"}
+{"type":"agent_start"}
+{"type":"message_update","message":{"role":"assistant","content":[]},"assistantMessageEvent":{"type":"text_delta","delta":"Wri"}}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"write","args":{"path":"a.txt","content":"hi"}}
+{"type":"tool_execution_end","toolCallId":"c1","toolName":"write","result":{"content":[{"type":"text","text":"ok"}]},"isError":false}
+{"type":"tool_execution_end","toolCallId":"c2","toolName":"bash","result":{"content":[{"type":"text","text":"command not found"}]},"isError":true}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"ignored"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"done"}],"stopReason":"stop","usage":{"input":900,"output":12,"cost":{"total":0.004}}}}
+{"type":"agent_end","messages":[]}
