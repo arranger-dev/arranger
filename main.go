@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+// githubURL is linked from the landing page.
+// TODO: replace with the real repository once it's published.
+const githubURL = "https://github.com/your-org/arranger"
+
 // buildID changes on every start, so pages served by an older process can tell they're stale.
 var buildID = fmt.Sprint(time.Now().UnixNano())
 
@@ -93,7 +97,7 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func landing(w http.ResponseWriter, r *http.Request) {
-	if err := tmpl.ExecuteTemplate(w, "landing.html", nil); err != nil {
+	if err := tmpl.ExecuteTemplate(w, "landing.html", map[string]string{"GitHub": githubURL}); err != nil {
 		log.Println(err)
 	}
 }

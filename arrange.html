@@ -7,7 +7,7 @@
 <script>try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "light" } catch {}</script>
 <style>
 :root {
-  --bg: #f7f7f8; --panel: #fff; --sunk: #f0f1f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
+  --bg: #f4f5f8; --grid: #0b0d140b; --panel: #fff; --sunk: #f0f1f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
   --accent: #3d6fe0; --on-accent: #fff; --drop: #3d6fe01f;
   --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
   --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079;
@@ -15,14 +15,18 @@
   font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
 }
 [data-theme=dark] {
-  --bg: #0e0f12; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
+  --bg: #0e0f12; --grid: #c0caf509; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
   --accent: #7aa2f7; --on-accent: #0e0f12; --drop: #7aa2f733;
   --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a;
   --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98;
   --add-bg: #1f2d22; --del-bg: #331f24;
 }
 * { box-sizing: border-box; border-radius: 0; }
-body { margin: 0; background: var(--bg); color: var(--text); display: grid; grid-template: auto 1fr / 180px 1fr auto; height: 100vh; overflow: hidden; }
+body { margin: 0; color: var(--text); background: var(--bg); display: grid; grid-template: auto 1fr / 180px 1fr auto; height: 100vh; overflow: hidden; }
+/* grid backdrop (after px0.ai): a fixed layer that fades out from the top center */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 32px 32px; -webkit-mask-image: radial-gradient(120% 70% at 50% 0, #000 25%, #0000 80%); mask-image: radial-gradient(120% 70% at 50% 0, #000 25%, #0000 80%); }
 button, select, input, textarea { font: inherit; color: inherit; }
 button { background: var(--panel); border: 1px solid var(--line); padding: 5px 12px; cursor: pointer; }
 button:hover { border-color: var(--muted); }
