@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"arranger/internal/git"
+	"arranger/internal/orch"
 	"arranger/internal/store"
 )
 
@@ -73,7 +74,8 @@ func (s *Server) diff(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res := map[string]any{"files": []git.FileDiff{}, "mergedInto": ""}
+	from := orch.BaseFor(wk.p, wk.a)
+	res := map[string]any{"files": []git.FileDiff{}, "mergedInto": "", "from": from, "behind": 0}
 	if wk.dir == "" {
 		writeJSON(w, res) // never ran, so no changes yet
 		return
@@ -84,12 +86,35 @@ func (s *Server) diff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res["files"] = fs
+	res["behind"] = git.Behind(wk.dir, from)
 	if mgr, _, err := s.st.Agent(wk.a.Parent); err == nil && len(fs) > 0 && git.BranchExists(wk.p.Repo, git.BranchOf(mgr.ID)) {
 		if _, err := git.Run(wk.p.Repo, "merge-base", "--is-ancestor", git.BranchOf(wk.a.ID), git.BranchOf(mgr.ID)); err == nil {
 			res["mergedInto"] = mgr.Name
 		}
 	}
 	writeJSON(w, res)
+}
+
+// sync merges the latest commits of the branch the agent works from into its work. Runs do this
+// on their own; this lets the user do it (and see conflicts) before running.
+func (s *Server) sync(w http.ResponseWriter, r *http.Request) {
+	wk, ok := s.editable(w, r)
+	if !ok {
+		return
+	}
+	_, _, n, err := s.o.Sync(wk.p, wk.a)
+	if err != nil {
+		fail(w, http.StatusConflict, err)
+		return
+	}
+	if n > 0 {
+		e := store.LogEvent{Agent: wk.a.ID, Kind: "msg", Text: fmt.Sprintf("synced with %s: %d new commit(s)", orch.BaseFor(wk.p, wk.a), n)}
+		s.st.AddEvent(&e)
+		s.o.Hub.Publish(wk.p.ID, map[string]any{"type": "event", "event": e})
+		g, _ := s.st.Goal(wk.a.ID)
+		s.o.Hub.Publish(wk.p.ID, map[string]any{"type": "status", "agent": wk.a.ID, "status": g.Status})
+	}
+	writeJSON(w, map[string]any{"commits": n, "from": orch.BaseFor(wk.p, wk.a)})
 }
 
 func (s *Server) checkpoints(w http.ResponseWriter, r *http.Request) {
@@ -185,13 +210,17 @@ func (s *Server) hunks(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusInternalServerError, err)
 			return
 		}
-		if _, err := git.RunIn(mdir, patch, "apply", "--check", "-"); err != nil {
-			http.Error(w, "doesn't apply cleanly to "+mgr.Name+"'s work: "+err.Error(), http.StatusConflict)
+		applied, present, err := git.ApplyHunks(mdir, fs, ids)
+		if err != nil {
+			fail(w, http.StatusConflict, fmt.Errorf("couldn't copy into %s's work: %w", mgr.Name, err))
 			return
 		}
-		git.RunIn(mdir, patch, "apply", "-")
-		git.Commit(mdir, fmt.Sprintf("arranger: promote %d change(s) from %s", n, wk.a.Name))
-		s.changed(wk.p, mgr, mdir, mbase)
+		if applied > 0 {
+			git.Commit(mdir, fmt.Sprintf("arranger: promote %d change(s) from %s", applied, wk.a.Name))
+			s.changed(wk.p, mgr, mdir, mbase)
+		}
+		writeJSON(w, map[string]any{"applied": applied, "present": present, "to": mgr.Name})
+		return
 	default:
 		http.Error(w, "action must be remove or promote", http.StatusBadRequest)
 		return

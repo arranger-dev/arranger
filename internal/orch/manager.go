@@ -140,12 +140,14 @@ func runChildren(j *job, kids []store.Agent, feedback map[string]string) map[str
 			res[k.ID] = "already running"
 			continue
 		}
+		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k}
+		kj.status("starting", nil) // the hand-off shows on the canvas at once, not after the worktree is ready
 		wg.Add(1)
 		go func(k store.Agent) {
 			defer wg.Done()
 			defer j.o.unregister(k.ID)
 			defer cancel()
-			s := j.o.execute(&job{o: j.o, ctx: ctx, p: j.p, a: k}, feedback[k.ID])
+			s := j.o.execute(kj, feedback[k.ID])
 			mu.Lock()
 			res[k.ID] = s
 			mu.Unlock()

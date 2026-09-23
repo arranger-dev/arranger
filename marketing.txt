@@ -1,0 +1,30 @@
+Arranger: marketing copy
+========================
+
+One-liner (use everywhere)
+  Arrange a team of AI coding agents and ship work that passes your checks.
+
+GitHub repo description (max ~350 chars)
+  Arrange a team of AI coding agents (Claude Code, Codex, Gemini and more) in your browser. Give it one goal and the checks that define done. Agents split the work, run in parallel on their own git branches, and only verified work gets merged. One binary, runs locally.
+
+GitHub topics
+  ai-agents, coding-agents, agent-orchestration, claude-code, codex, gemini-cli, developer-tools, git-worktree, golang, local-first
+
+SEO
+  <title>    Arranger: arrange a team of AI coding agents
+  meta description (max ~155 chars)
+    Build a team of AI coding agents, give it one goal, and get back work that passes your tests. Free, open source, and runs on your machine.
+
+Social (Open Graph / Twitter card)
+  og:title        Arranger: a team of AI coding agents that proves its work
+  og:description  Managers split the goal, workers build, checks decide what's done. Works with Claude Code, Codex, Gemini and more.
+
+Short social posts
+  - One agent with a huge prompt drifts. A team with small, checked goals doesn't. Meet arranger.
+  - Drag AI agents into a team, give them a goal and a test command, and merge only what passes.
+  - Run Claude Code, Codex and Gemini side by side on one goal, each on its own git branch.
+
+Tagline options
+  - Arrange agents. Ship verified work.
+  - Your AI team, with a definition of done.
+  - Nothing is done until the checks pass.

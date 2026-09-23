@@ -79,6 +79,22 @@ func (s *Server) saveArrangement(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	// removing a working agent would leave its process running with nothing on the canvas to stop it
+	keep := map[string]bool{}
+	for _, a := range as {
+		keep[a.ID] = true
+	}
+	old, err := s.st.Agents(r.PathValue("id"))
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	for _, a := range old {
+		if !keep[a.ID] && s.o.IsRunning(a.ID) {
+			fail(w, http.StatusConflict, fmt.Errorf("%s is running; stop it before removing it", a.Name))
+			return
+		}
+	}
 	if err := s.st.SaveArrangement(r.PathValue("id"), as); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return

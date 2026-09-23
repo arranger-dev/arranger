@@ -280,3 +280,20 @@ func newRepo(t *testing.T) string {
 	}
 	return repo
 }
+
+func TestStopAll(t *testing.T) {
+	o := setup(t)
+	repo := newRepo(t)
+	p, _ := o.Store.CreateProject(store.Project{Name: "x", Repo: repo, Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{{ID: "s", Name: "S", Runtime: "generic", Args: "sleep 30"}})
+	o.Store.SaveGoal("s", store.Goal{Title: "wait", Checks: "true"})
+	if err := o.Start("s"); err != nil {
+		t.Fatal(err)
+	}
+	if !o.StopAll(10 * time.Second) {
+		t.Fatal("run still going after StopAll")
+	}
+	if g, _ := o.Store.Goal("s"); g.Status != "stopped" {
+		t.Fatalf("status %q, want stopped", g.Status)
+	}
+}

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Arranger · {{.Project.Name}}</title>
 <link rel="icon" type="image/png" href="/arranger.png">
+<link rel="stylesheet" href="/fonts.css">
 <script>try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "light" } catch {}</script>
 <style>
 :root {
@@ -13,7 +14,7 @@
   --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
   --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079;
   --add-bg: #e6f4ea; --del-bg: #fdecec; --link: #8b919c;
-  font: 14px/1.4 ui-sans-serif, system-ui, sans-serif;
+  font: 14px/1.4 var(--sans);
 }
 [data-theme=dark] {
   --bg: #0e0f12; --grid: #c0caf509; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
@@ -35,11 +36,11 @@ button.primary { background: var(--accent); color: var(--on-accent); border-colo
 button.danger { color: var(--failed); }
 input, select, textarea { background: var(--panel); border: 1px solid var(--line); padding: 6px 8px; width: 100%; }
 textarea { resize: vertical; min-height: 60px; }
-.mono, textarea.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
 label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
 
 header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
-header h1 { font: 600 14px ui-monospace, monospace; margin: 0 8px 0 0; }
+header h1 { font: 600 14px var(--mono); margin: 0 8px 0 0; }
 header h1 a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 8px; }
 header h1 img { width: 22px; height: 22px; display: block; }
 header select { width: auto; }
@@ -67,8 +68,9 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 #canvas { position: relative; min-width: 100%; min-height: 100%; }
 #links { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
 #links path { fill: none; stroke: var(--link); stroke-width: 2.5; stroke-dasharray: 2 7; stroke-linecap: round; }
-/* a working agent's link flows up toward its manager */
+/* live links: up toward the manager while a report works for it, down while the manager hands out work */
 #links path.flow { stroke: var(--s); stroke-width: 3.5; animation: flow .7s linear infinite; }
+#links path.flow.down { animation-direction: reverse; }
 @keyframes flow { to { stroke-dashoffset: 18; } }
 #canvas .card { position: absolute; display: grid; }
 #canvas .card.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 6px 18px #0002; }
@@ -82,7 +84,7 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 .card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .x { color: var(--muted); cursor: pointer; }
 .card .x:hover { color: var(--failed); }
-.card .meta, .card .now, .card .badges { grid-column: 1 / -1; font: 11px ui-monospace, monospace; color: var(--muted); }
+.card .meta, .card .now, .card .badges { grid-column: 1 / -1; font: 11px var(--mono); color: var(--muted); }
 .card .now { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 14px; }
 .card .badges { display: flex; gap: 8px; }
 .card .badges:empty { display: none; }
@@ -104,7 +106,7 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 .st::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: var(--s, var(--idle)); }
 .busy .st::before, .st.busy::before { animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .3; } }
-[data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
+[data-status=starting], [data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
 [data-status=failed], [data-status=blocked] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
 [data-status=planning], [data-status=waiting], [data-status=reviewing] { --s: var(--manager); }
 .ok { color: var(--done); } .bad { color: var(--failed); }
@@ -117,7 +119,10 @@ aside .card { display: grid; width: 100%; margin-bottom: 8px; }
 #resize { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; z-index: 3; }
 #resize:hover, #resize.on { background: linear-gradient(90deg, transparent 4px, var(--accent) 4px, var(--accent) 6px, transparent 6px); }
 body.resizing { cursor: col-resize; user-select: none; }
-.istats { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 14px; border-bottom: 1px solid var(--line); font: 12px ui-monospace, monospace; color: var(--muted); }
+#i-msg { margin: 0; padding: 0 14px; min-height: 0; }
+#i-msg:not(:empty) { padding: 6px 14px; border-bottom: 1px solid var(--line); }
+#i-msg.bad { background: var(--del-bg); }
+.istats { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 14px; border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--muted); }
 .istats b { color: var(--text); font-weight: 600; }
 .istats .warn { color: var(--verifying); } .istats .over { color: var(--failed); }
 #inspector[hidden] { display: none; }
@@ -131,7 +136,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .row { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
 .feedback { white-space: pre-wrap; background: var(--del-bg); border: 1px solid var(--line); padding: 8px; max-height: 200px; overflow: auto; }
 
-#log { font: 12px/1.5 ui-monospace, monospace; padding-top: 8px; }
+#log { font: 12px/1.5 var(--mono); padding-top: 8px; }
 #log .ev { display: grid; grid-template-columns: 64px 48px 1fr; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--sunk); cursor: default; }
 #log .ev[data-raw] { cursor: pointer; }
 #log .t { color: var(--muted); }
@@ -144,16 +149,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 #log pre { grid-column: 1 / -1; margin: 4px 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all; }
 
 .file { border: 1px solid var(--line); margin-top: 10px; }
-.file summary { display: flex; gap: 10px; padding: 6px 10px; background: var(--sunk); cursor: pointer; font: 12px ui-monospace, monospace; }
+.file summary { display: flex; gap: 10px; padding: 6px 10px; background: var(--sunk); cursor: pointer; font: 12px var(--mono); }
 .file summary span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; }
-.hunk { font: 12px/1.45 ui-monospace, monospace; overflow-x: auto; }
+.hunk { font: 12px/1.45 var(--mono); overflow-x: auto; }
 .hunk .hh { color: var(--muted); padding: 2px 10px; background: var(--sunk); border-top: 1px solid var(--line); }
 .hunk div.l { white-space: pre; padding: 0 10px; }
 .hunk .a { background: var(--add-bg); } .hunk .d { background: var(--del-bg); }
 .empty { color: var(--muted); padding: 20px 0; }
 .file summary input, .hunk .hh input { width: auto; margin: 0 6px 0 0; vertical-align: middle; }
 .hunk .hh { display: flex; align-items: center; }
-.cp { display: grid; grid-template-columns: 64px 1fr auto auto; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--sunk); font: 12px ui-monospace, monospace; }
+.cp { display: grid; grid-template-columns: 64px 1fr auto auto; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--sunk); font: 12px var(--mono); }
 .cp .t { color: var(--muted); }
 .status { font-size: 12px; min-height: 18px; margin-top: 8px; }
 .status.ok { color: var(--done); } .status.bad { color: var(--failed); }
@@ -171,7 +176,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .radios input { width: auto; }
 .radios small { color: var(--muted); }
 #m-preview { font-size: 13px; margin-top: 12px; display: grid; gap: 6px; }
-#m-preview ul { margin: 0; padding-left: 18px; font: 12px ui-monospace, monospace; }
+#m-preview ul { margin: 0; padding-left: 18px; font: 12px var(--mono); }
 #log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
 
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(460px, 92vw); }
@@ -249,6 +254,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <button id="i-stop" class="danger">Stop</button>
     <button id="i-close" title="Close">×</button>
   </div>
+  <p class="status" id="i-msg" role="status"></p>
   <div class="istats" id="i-stats"></div>
   <div class="tabs">
     <button data-tab="goal" class="on">Goal</button><button data-tab="logs">Logs</button><button data-tab="diff">Diff</button><button data-tab="settings">Settings</button>
@@ -261,13 +267,14 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <p id="g-hint" class="hint"></p>
     <div id="g-feedback" hidden><label>Last failure</label><div class="feedback mono"></div></div>
     <div class="row"><button class="primary">Save goal</button><span id="g-state" class="hint" style="margin:0"></span></div>
+    <p class="status" id="g-msg" role="status"></p>
   </form>
   <div class="pane" data-pane="logs" hidden>
     <div class="row"><label style="margin:0;display:flex;gap:6px;align-items:center;width:auto"><input type="checkbox" id="raw" style="width:auto"> show raw output</label></div>
     <div id="log"></div>
   </div>
   <div class="pane" data-pane="diff" hidden>
-    <div class="row"><span id="diff-stat" class="hint" style="margin:0;flex:1"></span><button id="diff-refresh">Refresh</button></div>
+    <div class="row"><span id="diff-stat" class="hint" style="margin:0;flex:1"></span><button id="diff-sync" title="Merge the latest commits of the branch this agent works from into its work. Runs do this on their own.">Sync</button><button id="diff-refresh">Refresh</button></div>
     <div class="row" id="diff-actions" hidden>
       <span class="hint" style="margin:0;flex:1"><b id="n-sel">0</b> selected</span>
       <button id="h-remove" class="danger" title="Undo these changes in this agent's work; it won't re-add them">Remove</button>

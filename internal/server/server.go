@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"log"
 	"net"
 	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"arranger/internal/agents"
 	"arranger/internal/orch"
@@ -40,6 +41,8 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("GET /arrange", s.arrange)
 	mux.Handle("GET /app.js", http.FileServerFS(web.FS))
 	mux.Handle("GET /arranger.png", http.FileServerFS(web.FS))
+	mux.Handle("GET /fonts.css", http.FileServerFS(web.FS))
+	mux.Handle("GET /fonts/", http.FileServerFS(web.FS))
 	mux.HandleFunc("POST /api/projects", s.createProject)
 	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
 	mux.HandleFunc("POST /api/projects/{id}/arrangement", s.saveArrangement)
@@ -55,6 +58,7 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("GET /api/agents/{id}/diff", s.diff)
 	mux.HandleFunc("GET /api/agents/{id}/checkpoints", s.checkpoints)
 	mux.HandleFunc("POST /api/agents/{id}/revert", s.revert)
+	mux.HandleFunc("POST /api/agents/{id}/sync", s.sync)
 	mux.HandleFunc("POST /api/agents/{id}/hunks", s.hunks)
 	mux.HandleFunc("GET /api/agents/{id}/merge", s.merge)
 	mux.HandleFunc("POST /api/agents/{id}/merge", s.merge)
@@ -62,7 +66,7 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("PUT /api/types/{id}", s.saveType)
 	mux.HandleFunc("DELETE /api/types/{id}", s.deleteType)
 	mux.HandleFunc("GET /api/events", s.sse)
-	return guard(loopback, mux)
+	return logRequests(guard(loopback, mux))
 }
 
 // guard blocks cross-site writes (CSRF) and, on loopback, foreign Host headers
@@ -87,7 +91,7 @@ func guard(loopback bool, h http.Handler) http.Handler {
 
 func (s *Server) landing(w http.ResponseWriter, r *http.Request) {
 	if err := s.pages.ExecuteTemplate(w, "landing.html", map[string]string{"GitHub": GitHubURL}); err != nil {
-		log.Println(err)
+		zap.L().Error("render page", zap.Error(err))
 	}
 }
 
@@ -127,7 +131,7 @@ func (s *Server) arrange(w http.ResponseWriter, r *http.Request) {
 		"Types": types, "Build": s.build, "GitHub": GitHubURL,
 	})
 	if err != nil {
-		log.Println(err)
+		zap.L().Error("render page", zap.Error(err))
 	}
 }
 

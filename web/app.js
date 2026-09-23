@@ -6,7 +6,7 @@ const PID = document.body.dataset.project;
 const main = $("main"), canvas = $("#canvas"), linksSvg = $("#links");
 const SVG = "http://www.w3.org/2000/svg";
 const MAX_LOG_ROWS = 1000;
-const BUSY = ["running", "verifying", "planning", "waiting", "reviewing"];
+const BUSY = ["starting", "running", "verifying", "planning", "waiting", "reviewing"];
 const NEEDS = ["failed", "blocked"];
 const GAP_X = 240, GAP_Y = 150, PAD = 48, SNAP = 8;
 let dirty = false, selected = null, tab = "goal";
@@ -96,8 +96,17 @@ function layout(all) {
   [...agents.values()].filter(a => !parentOf(a.id)).forEach(r => place(r, 0, seen));
 }
 
-// drawLinks draws a dotted curve from each manager down to each report; a working agent's
-// link animates up toward its manager.
+// linkFlow says whether the link between a manager and a report is live, and which way it moves:
+// "down" while the manager hands out subgoals (planning, or the report is just starting),
+// "up" while the report works for its manager, or the manager reviews what it sent back.
+function linkFlow(mgrStatus, kidStatus) {
+  if (kidStatus === "starting" || mgrStatus === "planning") return { dir: "down", status: kidStatus === "starting" ? kidStatus : mgrStatus };
+  if (BUSY.includes(kidStatus)) return { dir: "up", status: kidStatus };
+  if (mgrStatus === "reviewing" && kidStatus === "done") return { dir: "up", status: mgrStatus };
+  return null;
+}
+
+// drawLinks draws a dotted curve from each manager down to each report, animated while they work together.
 function drawLinks() {
   let w = 0, h = 0;
   const paths = [];
@@ -110,8 +119,11 @@ function drawLinks() {
     const bend = Math.max(40, Math.abs(y2 - y1) / 2);
     const path = document.createElementNS(SVG, "path");
     path.setAttribute("d", `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}`);
-    path.dataset.status = a.el.dataset.status;
-    if (BUSY.includes(a.el.dataset.status)) path.classList.add("flow");
+    const flow = linkFlow(p.el.dataset.status, a.el.dataset.status);
+    if (flow) {
+      path.dataset.status = flow.status;
+      path.classList.add("flow", flow.dir);
+    }
     paths.push(path);
   }
   linksSvg.replaceChildren(...paths);
@@ -221,6 +233,7 @@ main.addEventListener("pointerdown", e => {
 canvas.addEventListener("click", e => {
   if (!e.target.classList.contains("x")) return;
   const id = e.target.closest(".card").dataset.id, a = agents.get(id);
+  if (BUSY.includes(a.el.dataset.status)) { say(`${a.name} is running; stop it before removing it`, true); return; }
   kidsOf(id).forEach(k => k.parent = a.parent); // reports move up a level
   if (selected === id) closeInspector();
   a.el.remove();
@@ -427,6 +440,8 @@ async function select(id) {
   $("#a-color").value = colorChoice || roleColor(id);
   fillParents(id);
   status($("#a-msg"), "");
+  status($("#i-msg"), "");
+  status($("#g-msg"), "");
   showGoalState(g);
   renderStats();
   showTab(tab);
@@ -495,11 +510,19 @@ function showTab(name) {
 }
 $$(".tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
+gform.addEventListener("input", () => status($("#g-msg"), "")); // "Saved" no longer holds once you edit
 const goalBody = () => ({ title: gform.elements.title.value, body: gform.elements.body.value, criteria: gform.elements.criteria.value, checks: gform.elements.checks.value });
 gform.onsubmit = async e => {
   e.preventDefault();
-  try { await api("PUT", `/api/agents/${selected}/goal`, goalBody()); say("goal saved"); refreshSummary(); }
-  catch (err) { say(err.message, true); }
+  const btn = e.submitter;
+  if (btn) btn.disabled = true;
+  status($("#g-msg"), "Saving…");
+  try {
+    await api("PUT", `/api/agents/${selected}/goal`, goalBody());
+    status($("#g-msg"), "Saved at " + time(Date.now()) + (gform.elements.checks.value.trim() ? "." : ". Add a check before running: a shell command that exits 0 when the goal is met."), !gform.elements.checks.value.trim());
+    refreshSummary();
+  } catch (err) { status($("#g-msg"), err.message, true); }
+  if (btn) btn.disabled = false;
 };
 
 aform.onsubmit = async e => {
@@ -518,16 +541,35 @@ aform.onsubmit = async e => {
   } catch (err) { status($("#a-msg"), err.message, true); }
 };
 
-$("#i-run").onclick = async () => {
+// runMsg reports on Run next to the button, where the user is looking; the header line is easy to miss.
+const runMsg = (t, bad) => { status($("#i-msg"), t, bad); if (t) say(t, bad); };
+
+$("#i-run").onclick = async e => {
+  const btn = e.currentTarget, id = selected, f = gform.elements;
+  const isManager = kidsOf(id).length > 0;
+  // catch what the server would refuse, and point at the field to fix
+  const missing = !f.title.value.trim() ? "title" : !f.checks.value.trim() ? "checks" : "";
+  if (missing) {
+    showTab("goal");
+    f[missing].focus();
+    runMsg(missing === "title" ? "Give the goal a title first." : "Add at least one check (a shell command that exits 0 when the goal is met), then Run.", true);
+    return;
+  }
+  btn.disabled = true;
+  runMsg("Starting…");
   try {
     if (dirty) await save();
-    if (gform.elements.title.value.trim()) await api("PUT", `/api/agents/${selected}/goal`, goalBody());
-    await api("POST", `/api/agents/${selected}/run`);
-    say("started");
+    await api("PUT", `/api/agents/${id}/goal`, goalBody()); // Run uses what's in the form, saved or not
+    await api("POST", `/api/agents/${id}/run`);
+    setStatus(id, "starting");
+    runMsg(isManager ? `${nameOf(id)} is planning for its team.` : `${nameOf(id)} is working.`);
+    refreshSummary();
     showTab("logs");
-  } catch (e) { say(e.message, true); }
+  } catch (err) { runMsg(err.message, true); }
+  btn.disabled = false;
 };
 $("#i-clone").onclick = async () => {
+  if (!confirm(`Add a copy of ${nameOf(selected)}? It gets the same settings and manager, but no goal.` + (dirty ? " Unsaved changes on the canvas are saved too." : ""))) return;
   try {
     const { agent: src } = await api("GET", `/api/agents/${encodeURIComponent(selected)}`);
     const s = agents.get(selected), parent = parentOf(selected) ?? "";
@@ -541,7 +583,7 @@ $("#i-clone").onclick = async () => {
     select(a.id);
   } catch (e) { say(e.message, true); }
 };
-$("#i-stop").onclick = () => api("POST", `/api/agents/${selected}/stop`).catch(e => say(e.message, true));
+$("#i-stop").onclick = () => api("POST", `/api/agents/${selected}/stop`).then(() => runMsg("Stopping…")).catch(e => runMsg(e.message, true));
 
 /* ---------- logs ---------- */
 
@@ -639,8 +681,14 @@ async function loadDiff() {
   $("#diff-stat").textContent = files.length ? `${files.length} file${files.length > 1 ? "s" : ""} · +${adds} −${dels}` : "";
   out.replaceChildren(...(nodes.length ? nodes : [el("div", "empty", "No changes yet.")]));
   $("#diff-actions").hidden = !files.length;
-  $("#diff-note").replaceChildren(...(d.mergedInto ? [el("p", "note",
-    `This work is already merged into ${d.mergedInto}. Removing a change here won't remove it from ${d.mergedInto}; open ${d.mergedInto} and remove it there, or re-run ${d.mergedInto}.`)] : []));
+  const notes = [];
+  if (d.behind) notes.push(el("p", "note", `${d.from} has ${d.behind} new commit${d.behind > 1 ? "s" : ""} this agent doesn't have yet. They're merged in when it runs, or press Sync to merge them now.`));
+  if (d.mergedInto) notes.push(el("p", "note",
+    `This work is already merged into ${d.mergedInto}. Removing a change here won't remove it from ${d.mergedInto}; open ${d.mergedInto} and remove it there, or re-run ${d.mergedInto}.`));
+  $("#diff-note").replaceChildren(...notes);
+  const sync = $("#diff-sync");
+  sync.textContent = d.behind ? `Sync with ${d.from} (${d.behind})` : `Up to date with ${d.from}`;
+  sync.disabled = !d.behind;
   const mgr = parentOf(selected);
   $("#h-promote").hidden = !mgr;
   if (mgr) $("#h-promote").textContent = "Promote to " + nameOf(mgr);
@@ -662,7 +710,7 @@ async function diffAction(btn, working, call, done) {
   btn.disabled = true;
   btn.textContent = working;
   diffMsg(working);
-  try { await call(); diffMsg(done); say(done); }
+  try { const r = await call(), msg = typeof done === "function" ? done(r) : done; diffMsg(msg); say(msg); }
   catch (e) { diffMsg(e.message, true); }
   btn.textContent = label;
   btn.disabled = false;
@@ -675,9 +723,14 @@ $("#h-remove").onclick = e => {
 };
 $("#h-promote").onclick = e => {
   const ids = selectedHunks(), to = nameOf(parentOf(selected));
+  const n = k => `${k} change${k > 1 ? "s" : ""}`;
   diffAction(e.currentTarget, "Promoting…", () => api("POST", `/api/agents/${selected}/hunks`, { action: "promote", ids }),
-    `Copied ${ids.length} change${ids.length > 1 ? "s" : ""} into ${to}'s work.`);
+    r => !r.applied ? `${to} already has ${r.present > 1 ? "these changes" : "this change"}; nothing to copy.`
+      : `Copied ${n(r.applied)} into ${to}'s work` + (r.present ? `; ${r.present} ${r.present > 1 ? "were" : "was"} already there.` : ".") +
+        ` They stay here too; open ${to} to see them.`);
 };
+$("#diff-sync").onclick = e => diffAction(e.currentTarget, "Syncing…", () => api("POST", `/api/agents/${selected}/sync`),
+  r => r.commits ? `Merged ${r.commits} new commit${r.commits > 1 ? "s" : ""} from ${r.from}. The diff still shows only this agent's changes.` : `Already up to date with ${r.from}.`);
 $("#diff-refresh").onclick = async () => {
   diffMsg("Refreshing…");
   if (await loadDiff()) diffMsg("Up to date as of " + time(Date.now()) + ".");
@@ -800,6 +853,15 @@ async function refreshSummary() {
   }
 }
 
+// setStatus shows a status change on the canvas right away, before the summary refetch.
+function setStatus(id, s) {
+  const st = summary.agents[id] ??= {};
+  if (st.status === s) return;
+  st.status = s;
+  if (BUSY.includes(s) && !st.since) st.since = Date.now();
+  refreshCards();
+}
+
 let summaryTimer = 0;
 // a throttle, not a debounce: busy agents send usage updates nonstop, which would keep postponing a debounced refresh
 const scheduleSummary = () => { summaryTimer ||= setTimeout(() => { summaryTimer = 0; refreshSummary(); }, 150); };
@@ -825,6 +887,7 @@ es.onmessage = m => {
     }
     if (e.agent === selected && tab === "logs") appendLive(e);
   } else if (msg.type === "status" || msg.type === "usage") {
+    if (msg.type === "status") setStatus(msg.agent, msg.status);
     scheduleSummary();
     if (msg.type === "status" && msg.agent === selected && tab === "diff" && !selectedHunks().length) loadDiff(); // don't wipe a selection in progress
   }

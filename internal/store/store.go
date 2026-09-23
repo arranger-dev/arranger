@@ -51,7 +51,7 @@ var migrations = []string{
 	`ALTER TABLE agents ADD COLUMN x REAL`,                                // canvas position; NULL = lay out automatically
 	`ALTER TABLE agents ADD COLUMN y REAL`,
 	// a crash mid-run leaves stale statuses behind
-	`UPDATE goals SET status = 'stopped' WHERE status IN ('running', 'verifying', 'planning', 'waiting', 'reviewing')`,
+	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing')`,
 }
 
 type Project struct {

@@ -3,15 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Arranger</title>
+<title>Arranger: arrange a team of AI coding agents</title>
+<meta name="description" content="Build a team of AI coding agents, give it one goal, and get back work that passes your tests. Free, open source, and runs on your machine.">
+<meta property="og:title" content="Arranger: a team of AI coding agents that proves its work">
+<meta property="og:description" content="Managers split the goal, workers build, checks decide what's done. Works with Claude Code, Codex, Gemini and more.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
 <link rel="icon" type="image/png" href="/arranger.png">
+<link rel="stylesheet" href="/fonts.css">
 <script>try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "light" } catch {}</script>
 <style>
 :root {
   --bg: #f4f5f8; --grid: #0b0d140b; --panel: #fff; --sunk: #eff0f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
   --accent: #3d6fe0; --on-accent: #fff;
   --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44; --done: #2f9e44;
-  font: 15px/1.55 ui-sans-serif, system-ui, sans-serif;
+  font: 15px/1.55 var(--sans);
 }
 [data-theme=dark] {
   --bg: #0e0f12; --grid: #c0caf509; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
@@ -25,18 +31,19 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-even
   background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
   background-size: 32px 32px; -webkit-mask-image: radial-gradient(120% 70% at 50% 0, #000 25%, #0000 80%); mask-image: radial-gradient(120% 70% at 50% 0, #000 25%, #0000 80%); }
 a { color: inherit; }
-code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+code, .mono { font-family: var(--mono); font-size: 13px; }
 .wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; }
 h1, h2, h3 { text-wrap: balance; margin: 0; }
+.hero h1, section > h2, .oss h2 { font-family: var(--serif); font-weight: 500; }
 p { margin: 0; }
 
 /* a solid bar so the grid never runs under the links */
 .navbar { position: sticky; top: 0; z-index: 10; background: var(--panel); border-bottom: 1px solid var(--line); }
 nav { display: flex; align-items: center; gap: 8px; padding: 10px 0; flex-wrap: wrap; }
-nav .brand { display: flex; align-items: center; gap: 10px; font: 600 15px ui-monospace, monospace; text-decoration: none; color: var(--text); }
+nav .brand { display: flex; align-items: center; gap: 10px; font: 600 15px var(--mono); text-decoration: none; color: var(--text); }
 nav .brand img { width: 28px; height: 28px; display: block; }
 nav .sp { flex: 1; }
-nav a.nb, nav button { font: 500 13px ui-sans-serif, system-ui, sans-serif; text-decoration: none; color: var(--text); background: var(--panel);
+nav a.nb, nav button { font: 500 13px var(--sans); text-decoration: none; color: var(--text); background: var(--panel);
   border: 1px solid var(--line); padding: 7px 14px; cursor: pointer; line-height: 1.2; }
 nav a.nb:hover, nav button:hover { border-color: var(--text); }
 nav a.nb.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
@@ -46,7 +53,7 @@ nav a.nb.primary { background: var(--accent); border-color: var(--accent); color
 .hero h1 span { color: var(--accent); }
 .hero p { color: var(--muted); font-size: 18px; max-width: 600px; }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; margin-top: 16px; }
-.cmd { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); padding: 10px 16px; font: 14px ui-monospace, monospace; }
+.cmd { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line); padding: 10px 16px; font: 14px var(--mono); }
 .cmd::before { content: "$"; color: var(--muted); }
 .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: var(--on-accent); text-decoration: none; font-weight: 600; padding: 10px 20px; border: 1px solid var(--accent); }
 .btn.ghost { background: var(--panel); color: var(--text); border-color: var(--line); }
@@ -58,11 +65,11 @@ figure { margin: 0; display: grid; gap: 10px; }
 .tree svg { display: block; width: 100%; min-width: 680px; height: auto; color: var(--muted); }
 svg .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
 svg .stripe.m { fill: var(--manager); } svg .stripe.c { fill: var(--coder); } svg .stripe.r { fill: var(--reviewer); } svg .stripe.t { fill: var(--tester); }
-svg .n { fill: var(--text); font: 600 14px ui-sans-serif, system-ui, sans-serif; }
-svg .role { fill: var(--muted); font: 11px ui-monospace, monospace; }
+svg .n { fill: var(--text); font: 600 14px var(--sans); }
+svg .role { fill: var(--muted); font: 11px var(--mono); }
 svg .down { fill: none; stroke: currentColor; stroke-width: 1.5; }
 svg .up { fill: none; stroke: var(--done); stroke-width: 1.5; stroke-dasharray: 5 4; }
-svg .lab { fill: var(--muted); font: 11px ui-monospace, monospace; }
+svg .lab { fill: var(--muted); font: 11px var(--mono); }
 svg .lab.ok { fill: var(--done); }
 figcaption { color: var(--muted); font-size: 14px; max-width: 72ch; }
 .key { display: inline-flex; gap: 6px; align-items: center; margin-right: 14px; white-space: nowrap; }
@@ -70,7 +77,7 @@ figcaption { color: var(--muted); font-size: 14px; max-width: 72ch; }
 .key i.up { border-top: 2px dashed var(--done); }
 
 section { padding: 64px 0 0; display: grid; gap: 20px; }
-.eyebrow { font: 500 12px/1 ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 section > h2 { font-size: 26px; }
 section > p { color: var(--muted); max-width: 64ch; }
 
@@ -82,12 +89,12 @@ section > p { color: var(--muted); max-width: 64ch; }
 
 .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 16px; counter-reset: s; }
 .steps li { counter-increment: s; border-top: 2px solid var(--text); padding-top: 12px; display: grid; gap: 6px; }
-.steps li::before { content: counter(s, decimal-leading-zero); font: 500 13px ui-monospace, monospace; color: var(--muted); }
+.steps li::before { content: counter(s, decimal-leading-zero); font: 500 13px var(--mono); color: var(--muted); }
 .steps h3 { font-size: 15px; }
 .steps p { color: var(--muted); font-size: 14px; }
 
 .runtimes { display: flex; flex-wrap: wrap; gap: 8px; }
-.runtimes span { border: 1px solid var(--line); background: var(--panel); padding: 4px 10px; font: 13px ui-monospace, monospace; }
+.runtimes span { border: 1px solid var(--line); background: var(--panel); padding: 4px 10px; font: 13px var(--mono); }
 
 .oss { margin: 64px 0; background: var(--panel); border: 1px solid var(--line); padding: 28px; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between; }
 .oss h2 { font-size: 22px; }
@@ -101,9 +108,8 @@ footer a { color: var(--muted); }
 <div class="navbar"><div class="wrap">
   <nav>
     <a class="brand" href="/"><img src="/arranger.png" alt="">arranger</a><span class="sp"></span>
-    <a class="nb" href="#why">Why</a><a class="nb" href="#how">How it works</a>
-    <a class="nb" href="{{.GitHub}}" rel="noopener">GitHub</a>
     <button id="theme" title="Toggle theme">◐</button>
+    <a class="nb" href="{{.GitHub}}" rel="noopener">GitHub</a>
     <a class="nb primary" href="/arrange">Open arranger</a>
   </nav>
 </div></div>

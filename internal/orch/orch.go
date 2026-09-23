@@ -5,6 +5,7 @@ package orch
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"arranger/internal/agents"
 	"arranger/internal/git"
@@ -57,6 +60,27 @@ func (o *Orchestrator) Stop(agentID string) bool {
 	return ok
 }
 
+// StopAll stops every run and waits up to timeout for them to wind down (agents are marked
+// stopped, checkpoints committed). It reports whether they all finished in time.
+func (o *Orchestrator) StopAll(timeout time.Duration) bool {
+	o.mu.Lock()
+	for _, cancel := range o.running {
+		cancel()
+	}
+	o.mu.Unlock()
+	for deadline := time.Now().Add(timeout); ; time.Sleep(50 * time.Millisecond) {
+		o.mu.Lock()
+		n := len(o.running)
+		o.mu.Unlock()
+		if n == 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
+}
+
 func (o *Orchestrator) IsRunning(agentID string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -81,8 +105,8 @@ func (o *Orchestrator) unregister(agentID string) {
 	o.mu.Unlock()
 }
 
-// baseFor is the branch an agent works from: its manager's branch when that exists, else the project base.
-func baseFor(p store.Project, a store.Agent) string {
+// BaseFor is the branch an agent works from: its manager's branch when that exists, else the project base.
+func BaseFor(p store.Project, a store.Agent) string {
 	if a.Parent != "" && git.BranchExists(p.Repo, git.BranchOf(a.Parent)) {
 		return git.BranchOf(a.Parent)
 	}
@@ -93,7 +117,7 @@ func baseFor(p store.Project, a store.Agent) string {
 // branch's tip when the worktree was made. It's kept across runs, so an agent's diff still
 // shows its work after a manager merged it.
 func (o *Orchestrator) Workspace(p store.Project, a store.Agent) (dir, base string, err error) {
-	branch := baseFor(p, a)
+	branch := BaseFor(p, a)
 	_, statErr := os.Stat(o.Dir(a.ID))
 	if dir, err = git.EnsureWorktree(o.Root, p.Repo, branch, a.ID); err != nil {
 		return "", "", err
@@ -111,6 +135,27 @@ func (o *Orchestrator) Workspace(p store.Project, a store.Agent) (dir, base stri
 	base = strings.TrimSpace(out)
 	o.Store.SetGoal(a.ID, map[string]any{"base": base})
 	return dir, base, nil
+}
+
+// Sync brings the agent's worktree up to date with the branch it works from (see BaseFor) and
+// returns its worktree, its new diff base, and how many commits came in. The agent's diff is
+// measured from the synced tip from then on, so upstream changes don't show as its work.
+func (o *Orchestrator) Sync(p store.Project, a store.Agent) (dir, base string, n int, err error) {
+	if dir, base, err = o.Workspace(p, a); err != nil {
+		return "", "", 0, err
+	}
+	from := BaseFor(p, a)
+	if n, err = git.Sync(dir, from); err != nil || n == 0 {
+		return dir, base, 0, err
+	}
+	out, err := git.Run(dir, "rev-parse", from)
+	if err != nil {
+		return dir, base, n, err
+	}
+	base = strings.TrimSpace(out)
+	o.Store.SetGoal(a.ID, map[string]any{"base": base})
+	o.RefreshDiff(a.ID, dir, base)
+	return dir, base, n, nil
 }
 
 // RefreshDiff recomputes the lines added and removed shown on the agent's box.
@@ -138,7 +183,9 @@ func checkGoal(a store.Agent, g store.Goal) error {
 // Start validates a run and starts it in the background. A manager runs its whole subtree.
 func (o *Orchestrator) Start(agentID string) error {
 	a, pid, err := o.Store.Agent(agentID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("agent %s not found; save the arrangement first", agentID)
+	} else if err != nil {
 		return fmt.Errorf("agent %s: %w", agentID, err)
 	}
 	p, err := o.Store.Project(pid)
@@ -160,10 +207,12 @@ func (o *Orchestrator) Start(agentID string) error {
 		cancel()
 		return fmt.Errorf("%s is already running", a.Name)
 	}
+	j := &job{o: o, ctx: ctx, p: p, a: a}
+	j.status("starting", nil) // before returning, so the page shows it working right away
 	go func() {
 		defer o.unregister(agentID)
 		defer cancel()
-		o.execute(&job{o: o, ctx: ctx, p: p, a: a}, "")
+		o.execute(j, "")
 	}()
 	return nil
 }
@@ -201,6 +250,7 @@ func (j *job) status(s string, kv map[string]any) string {
 }
 
 func (j *job) fail(s, msg string) string {
+	zap.L().Warn("agent "+s, zap.String("agent", j.a.Name), zap.String("id", j.a.ID), zap.String("reason", agents.Clip(msg, 300)))
 	j.emit("error", msg, "")
 	return j.status(s, map[string]any{"feedback": msg})
 }
@@ -208,7 +258,11 @@ func (j *job) fail(s, msg string) string {
 func (j *job) newRun(attempt int) { j.run = j.o.Store.NewRun(j.a.ID, attempt) }
 
 // execute runs an agent's goal and returns its final status. feedback comes from a reviewer.
-func (o *Orchestrator) execute(j *job, feedback string) string {
+func (o *Orchestrator) execute(j *job, feedback string) (status string) {
+	lg := zap.L().With(zap.String("agent", j.a.Name), zap.String("id", j.a.ID), zap.String("runtime", j.a.Runtime))
+	lg.Info("run started", zap.String("project", j.p.Name), zap.Bool("rerun", feedback != ""))
+	start := time.Now()
+	defer func() { lg.Info("run finished", zap.String("status", status), zap.Duration("took", time.Since(start))) }()
 	g, err := o.Store.Goal(j.a.ID)
 	if err == nil {
 		err = checkGoal(j.a, g)
@@ -220,9 +274,15 @@ func (o *Orchestrator) execute(j *job, feedback string) string {
 	if err != nil {
 		return j.fail("failed", err.Error())
 	}
-	dir, base, err := o.Workspace(j.p, j.a)
-	if err != nil {
+	// every run starts from the latest code on the branch the agent works from
+	dir, base, n, err := o.Sync(j.p, j.a)
+	switch {
+	case dir == "":
 		return j.fail("failed", err.Error())
+	case err != nil:
+		j.emit("warn", "couldn't sync with "+BaseFor(j.p, j.a)+", working from where this agent left off: "+err.Error(), "")
+	case n > 0:
+		j.emit("msg", fmt.Sprintf("synced with %s: %d new commit(s)", BaseFor(j.p, j.a), n), "")
 	}
 	g.Base = base
 	o.Store.SetGoal(j.a.ID, map[string]any{"attempts": 0, "feedback": "", "passed": 0, "total": 0, "since": time.Now().UnixMilli()})

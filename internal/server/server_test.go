@@ -117,6 +117,93 @@ func TestPages(t *testing.T) {
 		t.Fatalf("logo: %d %s", w.Code, w.Header().Get("Content-Type"))
 	}
 	a.must(404, "GET", "/nope", "")
+
+	css := a.must(200, "GET", "/fonts.css", "")
+	if !strings.Contains(css, "Plex Sans") || !strings.Contains(page, "/fonts.css") || !strings.Contains(landing, "/fonts.css") {
+		t.Fatal("both pages should load the embedded fonts")
+	}
+	r = httptest.NewRequest("GET", "http://localhost:7777/fonts/lilex-latin-400-normal.woff2", nil)
+	w = httptest.NewRecorder()
+	a.h.ServeHTTP(w, r)
+	if w.Code != 200 || w.Body.Len() < 1000 {
+		t.Fatalf("font file: %d, %d bytes", w.Code, w.Body.Len())
+	}
+	if strings.Contains(landing, `href="#why"`) || strings.Index(landing, `id="theme"`) > strings.Index(landing, `rel="noopener">GitHub</a>`) {
+		t.Fatal("landing navbar: no Why/How links, theme toggle before GitHub")
+	}
+}
+
+func TestProjectOnRepoWithoutCommits(t *testing.T) {
+	a := newApp(t)
+	repo := t.TempDir()
+	exec.Command("git", "-C", repo, "init", "-q").Run()
+	code, body := a.do("POST", "/api/projects", `{"name":"x","repo":"`+repo+`"}`)
+	if code != 400 || !strings.Contains(body, "no commits yet") {
+		t.Fatalf("%d %s", code, body)
+	}
+}
+
+// Pressing Run must show the agent working at once: the 202 comes after the "starting"
+// status went out on the live stream, through the logging middleware's flushes.
+func TestRunShowsWorkingAtOnce(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"sleep 1"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"wait","checks":"true"}`)
+
+	srv := httptest.NewServer(a.h)
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/api/events?project="+p.ID, nil)
+	req.Host = "localhost"
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	lines := make(chan string, 64)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := res.Body.Read(buf)
+			for _, l := range strings.Split(string(buf[:n]), "\n") {
+				if l != "" {
+					lines <- l
+				}
+			}
+			if err != nil {
+				close(lines)
+				return
+			}
+		}
+	}()
+	if l := <-lines; !strings.Contains(l, "hello") {
+		t.Fatalf("first message: %s", l)
+	}
+
+	a.must(202, "POST", "/api/agents/k/run", "")
+	if g, _ := a.st.Goal("k"); g.Status == "idle" {
+		t.Fatal("status should already be busy when Run returns")
+	}
+	a.must(409, "POST", "/api/projects/"+p.ID+"/arrangement", `[]`) // can't delete a running agent
+	if _, body := a.do("POST", "/api/agents/nope/run", ""); !strings.Contains(body, "not found") {
+		t.Fatalf("unknown agent: %s", body)
+	}
+	select {
+	case l := <-lines:
+		if !strings.Contains(l, `"status":"starting"`) {
+			t.Fatalf("first live update: %s", l)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no live update after Run")
+	}
+	for deadline := time.Now().Add(20 * time.Second); a.o.IsRunning("k"); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("run never finished")
+		}
+	}
 }
 
 func TestProjectsArrangementAndSettings(t *testing.T) {
@@ -254,4 +341,120 @@ func newRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+// Promote copies a report's changes into its manager's work: skipping what the manager already
+// has (e.g. after it merged the report), and refusing, with the manager untouched, on a conflict.
+func TestPromoteToManager(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, "make.sh"), []byte("printf 'one\\n2\\n' > a.txt\necho new > b.txt\n"), 0o644)
+	git.Commit(repo, "add make.sh")
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"lead","name":"Lead","role":"manager"},{"id":"k","name":"Kid","role":"coder","parent":"lead"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"sh make.sh"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"write files","checks":"test -f b.txt"}`)
+	a.must(202, "POST", "/api/agents/k/run", "")
+	for a.o.IsRunning("k") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	var d struct{ Files []git.FileDiff }
+	hunks := func() map[string]string { // path -> quoted hunk id
+		json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/diff", "")), &d)
+		m := map[string]string{}
+		for _, f := range d.Files {
+			m[f.Path] = `"` + f.Hunks[0].ID + `"`
+		}
+		return m
+	}
+	var res struct{ Applied, Present int }
+	promote := func(ids ...string) (int, string) {
+		code, out := a.do("POST", "/api/agents/k/hunks", `{"action":"promote","ids":[`+strings.Join(ids, ",")+`]}`)
+		res.Applied, res.Present = 0, 0
+		json.Unmarshal([]byte(out), &res)
+		return code, out
+	}
+
+	h := hunks()
+	if code, out := promote(h["b.txt"]); code != 200 || res.Applied != 1 {
+		t.Fatalf("first promote: %d %s", code, out)
+	}
+	if code, out := promote(h["a.txt"], h["b.txt"]); code != 200 || res.Applied != 1 || res.Present != 1 {
+		t.Fatalf("b.txt is already in Lead, a.txt isn't: %d %s", code, out)
+	}
+	if code, out := promote(h["a.txt"], h["b.txt"]); code != 200 || res.Applied != 0 || res.Present != 2 {
+		t.Fatalf("promoting what Lead has: %d %s", code, out)
+	}
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/lead/diff", "")), &d)
+	if len(d.Files) != 2 {
+		t.Fatalf("lead diff: %+v", d.Files)
+	}
+
+	// Lead rewrites the line the kid changes: a conflict, named by file, with Lead left clean
+	lead := a.o.Dir("lead")
+	os.WriteFile(filepath.Join(lead, "a.txt"), []byte("one\ndeux\n"), 0o644)
+	git.Commit(lead, "lead edits a.txt")
+	os.WriteFile(filepath.Join(a.o.Dir("k"), "a.txt"), []byte("one\nzwei\n"), 0o644)
+	git.Commit(a.o.Dir("k"), "kid edits a.txt again")
+	if code, out := promote(hunks()["a.txt"]); code != 409 || !strings.Contains(out, "a.txt") {
+		t.Fatalf("conflicting promote: %d %s", code, out)
+	}
+	if st, _ := git.Run(lead, "status", "--porcelain"); strings.TrimSpace(st) != "" {
+		t.Fatalf("lead's worktree should be untouched after a failed promote:\n%s", st)
+	}
+}
+
+// Commits on the base branch after an agent ran reach it: the Diff tab says how far behind it
+// is, Sync (or the next run) merges them in, and they don't show up as the agent's changes.
+func TestSyncWithBaseBranch(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"}]`)
+	os.WriteFile(filepath.Join(repo, "kid.sh"), []byte("echo x >> kid.txt\n"), 0o644)
+	git.Commit(repo, "add kid.sh")
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"sh kid.sh"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"t","checks":"test -f kid.txt"}`)
+	run := func() {
+		a.must(202, "POST", "/api/agents/k/run", "")
+		for a.o.IsRunning("k") {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	run()
+	a.must(404, "POST", "/api/agents/nope/sync", "")
+	os.WriteFile(filepath.Join(repo, "user.txt"), []byte("new\n"), 0o644)
+	git.Commit(repo, "user work on main")
+
+	var d struct {
+		Files  []git.FileDiff
+		From   string
+		Behind int
+	}
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/diff", "")), &d)
+	if d.From != "main" || d.Behind != 1 || len(d.Files) != 1 {
+		t.Fatalf("before sync: from %q behind %d", d.From, d.Behind)
+	}
+	a.must(200, "POST", "/api/agents/k/sync", "")
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/diff", "")), &d)
+	if d.Behind != 0 || len(d.Files) != 1 || d.Files[0].Path != "kid.txt" {
+		t.Fatalf("after sync: behind %d, files %+v", d.Behind, d.Files)
+	}
+
+	// the next run syncs by itself
+	os.WriteFile(filepath.Join(repo, "user2.txt"), []byte("more\n"), 0o644)
+	git.Commit(repo, "more user work")
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"t","checks":"test -f user2.txt"}`) // only passes on synced code
+	run()
+	if g, _ := a.st.Goal("k"); g.Status != "done" {
+		t.Fatalf("run on synced code: %+v", g)
+	}
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/diff", "")), &d)
+	for _, f := range d.Files {
+		if strings.HasPrefix(f.Path, "user") {
+			t.Fatalf("upstream file %s shows as the agent's change", f.Path)
+		}
+	}
 }

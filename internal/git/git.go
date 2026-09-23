@@ -33,6 +33,15 @@ func CheckRepo(repo, base string) (string, error) {
 	if _, err := Run(repo, "rev-parse", "--show-toplevel"); err != nil {
 		return "", fmt.Errorf("%s is not a git repository", repo)
 	}
+	// after a fresh `git init` HEAD names a branch with no commit yet: there's nothing to branch agents from
+	if _, err := Run(repo, "rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
+		if out, _ := Run(repo, "rev-list", "-n1", "--all"); strings.TrimSpace(out) == "" {
+			return "", fmt.Errorf(`%s has no commits yet. Make a first commit (e.g. git commit --allow-empty -m "initial commit") and save again`, repo)
+		}
+		if base == "" {
+			return "", fmt.Errorf("the current branch of %s has no commits yet; enter a base branch that does", repo)
+		}
+	}
 	if base == "" {
 		out, err := Run(repo, "rev-parse", "--abbrev-ref", "HEAD")
 		if err != nil {
@@ -188,6 +197,44 @@ func HunkPatch(fs []FileDiff, ids map[string]bool) (patch string, n int) {
 	return b.String(), n
 }
 
+// ApplyHunks copies the selected hunks into the worktree at dir and commits nothing: the caller
+// commits. Hunks dir already has are skipped (present); the rest apply as a patch, or as a
+// three-way merge when dir's files have moved on. On a conflict dir is left as it was.
+func ApplyHunks(dir string, fs []FileDiff, ids map[string]bool) (applied, present int, err error) {
+	if _, err := Commit(dir, "arranger: save work before applying changes"); err != nil {
+		return 0, 0, err
+	}
+	todo := map[string]bool{}
+	for id := range ids {
+		p, n := HunkPatch(fs, map[string]bool{id: true})
+		if n == 0 {
+			continue
+		}
+		if _, err := RunIn(dir, p, "apply", "-R", "--check", "-"); err == nil {
+			present++ // undoing it would apply cleanly, so it's already there
+			continue
+		}
+		todo[id] = true
+	}
+	if len(todo) == 0 {
+		return 0, present, nil
+	}
+	patch, n := HunkPatch(fs, todo)
+	if _, err := RunIn(dir, patch, "apply", "--check", "-"); err == nil {
+		_, err = RunIn(dir, patch, "apply", "-")
+		return n, present, err
+	}
+	if _, err := RunIn(dir, patch, "apply", "--3way", "-"); err != nil {
+		out, _ := Run(dir, "diff", "--name-only", "--diff-filter=U")
+		Run(dir, "reset", "-q", "--hard", "HEAD") // drop the half-applied patch; work was committed above
+		if cs := lines(out); len(cs) > 0 {
+			return 0, present, fmt.Errorf("conflicts in %s", strings.Join(cs, ", "))
+		}
+		return 0, present, err
+	}
+	return n, present, nil
+}
+
 type Checkpoint struct {
 	SHA     string `json:"sha"`
 	Subject string `json:"subject"`
@@ -237,6 +284,38 @@ func MergeBranch(dir, branch, msg string) error {
 		return err
 	}
 	return nil
+}
+
+// Behind counts the commits on branch that the worktree at dir doesn't have yet.
+func Behind(dir, branch string) int {
+	out, err := Run(dir, "rev-list", "--count", "HEAD.."+branch)
+	if err != nil {
+		return 0
+	}
+	var n int
+	fmt.Sscan(out, &n)
+	return n
+}
+
+// Sync merges branch into the worktree at dir so the agent works on the latest code, and returns
+// how many new commits it brought in. A conflicting merge is abandoned and the conflicts named.
+func Sync(dir, branch string) (int, error) {
+	if _, err := Commit(dir, "arranger: save work before sync"); err != nil {
+		return 0, err
+	}
+	n := Behind(dir, branch)
+	if n == 0 {
+		return 0, nil
+	}
+	if _, err := Run(dir, append(identity, "merge", "--no-edit", "-m", "arranger: sync with "+branch, branch)...); err != nil {
+		out, _ := Run(dir, "diff", "--name-only", "--diff-filter=U")
+		Run(dir, "merge", "--abort")
+		if cs := lines(out); len(cs) > 0 {
+			return 0, fmt.Errorf("%s conflicts with this agent's work in %s", branch, strings.Join(cs, ", "))
+		}
+		return 0, err
+	}
+	return n, nil
 }
 
 // CheckedOutAt returns the worktree that has branch checked out, or "".

@@ -27,6 +27,28 @@ func newRepo(t *testing.T) string {
 	return repo
 }
 
+// A freshly initialized repo has an unborn HEAD; saving it must explain what to do, not dump git's error.
+func TestCheckRepoWithoutCommits(t *testing.T) {
+	repo := t.TempDir()
+	exec.Command("git", "-C", repo, "init", "-q", "-b", "main").Run()
+	for _, base := range []string{"", "main"} {
+		_, err := CheckRepo(repo, base)
+		if err == nil || !strings.Contains(err.Error(), "no commits yet") || strings.Contains(err.Error(), "ambiguous") {
+			t.Fatalf("base %q: want a 'no commits yet' error, got %v", base, err)
+		}
+	}
+
+	// an orphan branch in a repo that has commits elsewhere: blank base can't default to it
+	repo = newRepo(t)
+	exec.Command("git", "-C", repo, "checkout", "-q", "--orphan", "fresh").Run()
+	if _, err := CheckRepo(repo, ""); err == nil || !strings.Contains(err.Error(), "enter a base branch") {
+		t.Fatalf("orphan branch: got %v", err)
+	}
+	if base, err := CheckRepo(repo, "main"); err != nil || base != "main" {
+		t.Fatalf("orphan branch with base main: %q %v", base, err)
+	}
+}
+
 func TestWorktreeDiff(t *testing.T) {
 	repo := newRepo(t)
 	base, err := CheckRepo(repo, "")
@@ -201,5 +223,55 @@ func TestMergeInto(t *testing.T) {
 	after, _ := Run(repo, "rev-parse", "main")
 	if out, _ := Run(repo, "status", "--porcelain"); before != after || out != "" {
 		t.Fatalf("failed merge left changes: %q", out)
+	}
+}
+
+func TestSync(t *testing.T) {
+	repo := newRepo(t)
+	dir, err := EnsureWorktree(t.TempDir(), repo, "main", "agent1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := Run(repo, "rev-parse", "main")
+	os.WriteFile(filepath.Join(dir, "mine.txt"), []byte("agent\n"), 0o644) // uncommitted work survives the sync
+
+	// the user commits to main after the agent branched off
+	os.WriteFile(filepath.Join(repo, "theirs.txt"), []byte("user\n"), 0o644)
+	Commit(repo, "user work")
+	if n := Behind(dir, "main"); n != 1 {
+		t.Fatalf("behind = %d, want 1", n)
+	}
+	if n, err := Sync(dir, "main"); err != nil || n != 1 {
+		t.Fatalf("sync: %d %v", n, err)
+	}
+	for _, f := range []string{"mine.txt", "theirs.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Fatalf("%s missing after sync", f)
+		}
+	}
+	if n, err := Sync(dir, "main"); err != nil || n != 0 {
+		t.Fatalf("second sync should be a no-op: %d %v", n, err)
+	}
+	// measured from main's new tip, the diff holds only the agent's own work
+	tip, _ := Run(repo, "rev-parse", "main")
+	if fs, _ := Diff(dir, strings.TrimSpace(tip)); len(fs) != 1 || fs[0].Path != "mine.txt" {
+		t.Fatalf("diff from new tip: %+v", fs)
+	}
+	if fs, _ := Diff(dir, strings.TrimSpace(base)); len(fs) != 2 {
+		t.Fatalf("diff from the old base should include theirs.txt too: %+v", fs)
+	}
+
+	// both sides change the same line: the merge is abandoned and the file named
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\nagent\n"), 0o644)
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("one\nuser\n"), 0o644)
+	Commit(repo, "user edits a.txt")
+	if _, err := Sync(dir, "main"); err == nil || !strings.Contains(err.Error(), "a.txt") {
+		t.Fatalf("conflicting sync: %v", err)
+	}
+	if st, _ := Run(dir, "status", "--porcelain"); strings.TrimSpace(st) != "" {
+		t.Fatalf("worktree should be clean after an abandoned sync:\n%s", st)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(b) != "one\nagent\n" {
+		t.Fatalf("agent's a.txt changed: %q", b)
 	}
 }

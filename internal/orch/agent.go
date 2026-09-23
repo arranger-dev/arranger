@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"arranger/internal/agents"
 )
 
@@ -64,6 +66,8 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
+	started := time.Now()
+	zap.L().Debug("agent process started", zap.String("agent", j.a.Name), zap.String("cmd", cmd.Path), zap.Int("pid", cmd.Process.Pid), zap.String("dir", dir))
 	var cost float64
 	var in, out int
 	var final, lastMsg, delta string
@@ -134,6 +138,8 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 	flush()
 	werr := cmd.Wait()
 	j.o.Store.UpdateRun(j.run, cost, in, out, cmd.ProcessState.ExitCode())
+	zap.L().Info("agent process exited", zap.String("agent", j.a.Name), zap.Int("exit", cmd.ProcessState.ExitCode()),
+		zap.Duration("took", time.Since(started)), zap.Int("tokensIn", in), zap.Int("tokensOut", out), zap.Float64("cost", cost))
 	if final == "" {
 		final = lastMsg
 	}
@@ -157,6 +163,7 @@ func runChecks(j *job, dir string, checks []string) (int, string) {
 		if len(tail) > 2000 {
 			tail = "…" + tail[len(tail)-2000:]
 		}
+		zap.L().Debug("check", zap.String("agent", j.a.Name), zap.String("cmd", c), zap.Bool("ok", err == nil))
 		if err == nil {
 			passed++
 			j.emit("check", "✓ "+c, tail)
