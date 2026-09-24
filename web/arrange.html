@@ -154,6 +154,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 #log .ev[data-kind=stderr] .x { color: var(--muted); }
 #log pre { grid-column: 1 / -1; margin: 4px 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all; }
 
+#diff-stat.live::after { content: " · live"; color: var(--running); font-weight: 600; }
+#diff-stat.live:empty::after { content: "live"; }
 .file { border: 1px solid var(--line); margin-top: 10px; }
 .file summary { display: flex; gap: 10px; padding: 6px 10px; background: var(--sunk); cursor: pointer; font: 12px var(--mono); }
 .file summary span:first-child { flex: 1; overflow: hidden; text-overflow: ellipsis; }
@@ -184,6 +186,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 #m-preview { font-size: 13px; margin-top: 12px; display: grid; gap: 6px; }
 #m-preview ul { margin: 0; padding-left: 18px; font: 12px var(--mono); }
 #log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
+#log .ev[data-kind=request] .k, #log .ev[data-kind=request] .x { color: var(--accent); font-weight: 600; }
+/* the way to iterate once an agent has run: say what should change, re-run only what it concerns */
+#revise { margin-top: 14px; padding: 4px 12px 10px; background: var(--sunk); border: 1px solid var(--line); border-left: 3px solid var(--accent); }
+#revise label { color: var(--text); font-weight: 600; font-size: 13px; }
+#revise .hint { margin-top: 6px; }
 
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(460px, 92vw); }
 dialog::backdrop { background: #0006; }
@@ -273,6 +280,13 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <button data-tab="goal" class="on">Goal</button><button data-tab="logs">Logs</button><button data-tab="diff">Diff</button><button data-tab="settings">Settings</button>
   </div>
   <form class="pane" data-pane="goal" id="goal-form">
+    <div id="revise" hidden>
+      <label for="r-change">Request changes</label>
+      <textarea id="r-change" rows="3" placeholder="What should be different? e.g. Webhooks should retry 3 times; the checkout button should say Subscribe."></textarea>
+      <p class="hint" id="r-hint"></p>
+      <div class="row"><button type="button" class="primary" id="r-go">Run with these changes</button><span class="hint" style="margin:0">⌘/Ctrl + Enter</span></div>
+      <p class="status" id="r-msg" role="status"></p>
+    </div>
     <label>Goal</label><input name="title" placeholder="Add rate limiting to /login" required>
     <label>Details</label><textarea name="body" placeholder="Context the agent needs"></textarea>
     <label>Acceptance criteria</label><textarea name="criteria" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
@@ -333,7 +347,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <form method="dialog" id="type-form">
     <h3></h3>
     <div class="pair">
-      <div><label>Name (used as the role)</label><input name="name" required pattern="[A-Za-z0-9_\-]+" placeholder="security-reviewer"></div>
+      <div><label>Name</label><input name="name" required maxlength="40" placeholder="Security Reviewer"></div>
       <div><label>Color</label><input name="color" type="color" value="#3d6fe0" style="height:34px;padding:2px"></div>
     </div>
     <div class="pair">

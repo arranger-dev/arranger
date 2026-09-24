@@ -137,9 +137,12 @@ function drawLinks() {
 
 function markDirty() { dirty = true; say("unsaved changes"); }
 
+// slug makes a role usable in an agent id (ids name folders and git branches): "Frontend Guy" → "frontend-guy".
+const slug = s => s.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "agent";
+
 function addAgent(role, name, type, x, y, parent) {
   const a = {
-    id: role + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    id: slug(role) + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     name, role, runtime: type?.runtime ?? "claude", parent: parent ?? "", color: "",
     x: Math.max(0, Math.round(x / SNAP) * SNAP), y: Math.max(0, Math.round(y / SNAP) * SNAP),
     defaults: type ? { model: type.model, args: type.args, prompt: type.prompt } : null,
@@ -247,7 +250,13 @@ canvas.addEventListener("dblclick", e => {
   const v = a && prompt("Agent name", a.name);
   if (v?.trim()) { a.name = v.trim(); paintCard(a); markDirty(); }
 });
-$("#tidy").onclick = () => { layout(true); agents.forEach(paintCard); drawLinks(); markDirty(); };
+$("#tidy").onclick = () => {
+  layout(true);
+  agents.forEach(paintCard);
+  drawLinks();
+  main.scrollTo({ left: 0, top: 0, behavior: "smooth" }); // the tidy tree starts at the top left; don't leave the view on empty canvas
+  markDirty();
+};
 
 async function save() {
   const list = [...agents.values()].sort((a, b) => a.y - b.y || a.x - b.x).map(a => ({
@@ -442,6 +451,7 @@ async function select(id) {
   status($("#a-msg"), "");
   status($("#i-msg"), "");
   status($("#g-msg"), "");
+  if (id !== revisingFor) { $("#r-change").value = ""; status($("#r-msg"), ""); } // a draft belongs to its agent
   showGoalState(g);
   renderStats();
   showTab(tab);
@@ -468,7 +478,13 @@ $("#a-parent").onchange = e => {
 };
 
 function showGoalState(g) {
-  const mgr = parentOf(selected);
+  const mgr = parentOf(selected), team = kidsOf(selected);
+  // once an agent has run (and isn't running), changes go through Request changes, not goal edits
+  $("#revise").hidden = !g.title || g.status === "idle" || BUSY.includes(g.status);
+  $("#r-hint").textContent = team.length
+    ? `${nameOf(selected)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(selected)} reviews and merges the changes and runs its checks again.`
+    : `${nameOf(selected)} keeps its work and changes only this, then its checks run again.`;
+  $("#i-run").title = team.length ? "Plan again from the goal and run the whole team" : "Run from the goal";
   $("#g-hint").textContent = kidsOf(selected).length
     ? "Manager: Run plans subgoals for its team, runs them in parallel, reviews and merges their work, then runs these checks on the result."
     : mgr ? `${nameOf(mgr)} sets this goal when it plans; editing it here is fine, but the next plan replaces it.` : "";
@@ -506,7 +522,7 @@ function showTab(name) {
   $$(".tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
   $$("#inspector .pane").forEach(p => p.hidden = p.dataset.pane !== name);
   if (name === "logs") loadLogs();
-  if (name === "diff") { status($("#diff-msg"), ""); loadDiff(); }
+  if (name === "diff") { status($("#diff-msg"), ""); shownDiff = ""; loadDiff(); }
 }
 $$(".tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
@@ -568,6 +584,29 @@ $("#i-run").onclick = async e => {
   } catch (err) { runMsg(err.message, true); }
   btn.disabled = false;
 };
+// Request changes: re-run an agent that already worked with what the user wants different.
+let revisingFor = null;
+$("#r-change").oninput = () => { revisingFor = selected; };
+$("#r-change").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#r-go").click(); } };
+$("#r-go").onclick = async e => {
+  const btn = e.currentTarget, id = selected, change = $("#r-change").value.trim();
+  if (!change) { status($("#r-msg"), "Describe what should change first.", true); $("#r-change").focus(); return; }
+  btn.disabled = true;
+  status($("#r-msg"), "Starting…");
+  try {
+    if (dirty) await save();
+    await api("POST", `/api/agents/${id}/revise`, { change });
+    $("#r-change").value = "";
+    revisingFor = null;
+    status($("#r-msg"), "");
+    setStatus(id, "starting");
+    runMsg(kidsOf(id).length ? `${nameOf(id)} is passing your changes to its team.` : `${nameOf(id)} is making your changes.`);
+    refreshSummary();
+    showTab("logs");
+  } catch (err) { status($("#r-msg"), err.message, true); }
+  btn.disabled = false;
+};
+
 $("#i-clone").onclick = async () => {
   if (!confirm(`Add a copy of ${nameOf(selected)}? It gets the same settings and manager, but no goal.` + (dirty ? " Unsaved changes on the canvas are saved too." : ""))) return;
   try {
@@ -647,19 +686,29 @@ function updateSelection() {
   $("#h-remove").disabled = $("#h-promote").disabled = n === 0;
 }
 
+let shownDiff = ""; // what the Diff tab shows now, so live refreshes skip re-rendering when nothing changed
+
 async function loadDiff() {
   if (!selected) return false;
-  const out = $("#diff");
+  const out = $("#diff"), id = selected;
   let d, cps;
   try {
-    [d, cps] = await Promise.all([api("GET", `/api/agents/${selected}/diff`), api("GET", `/api/agents/${selected}/checkpoints`)]);
-  } catch (e) { diffMsg(e.message, true); out.replaceChildren(); return false; }
+    [d, cps] = await Promise.all([api("GET", `/api/agents/${id}/diff`), api("GET", `/api/agents/${id}/checkpoints`)]);
+  } catch (e) { diffMsg(e.message, true); out.replaceChildren(); shownDiff = ""; return false; }
+  if (id !== selected) return false; // another agent was picked while this loaded
+  const live = BUSY.includes(summary.agents[id]?.status);
+  const key = id + JSON.stringify([live, d, cps]);
+  if (key === shownDiff) return true;
+  shownDiff = key;
+  const pane = $('[data-pane="diff"]'), top = pane.scrollTop;
+  const closed = new Set($$("#diff .file:not([open])").map(f => f.dataset.path)); // keep files the user folded
   const files = d.files;
   let adds = 0, dels = 0;
   const nodes = files.map(f => {
     adds += f.adds; dels += f.dels;
     const det = el("details", "file");
-    det.open = true;
+    det.dataset.path = f.path;
+    det.open = !closed.has(f.path);
     const sum = el("summary"), all = el("input");
     all.type = "checkbox";
     all.title = "Select the whole file";
@@ -679,7 +728,9 @@ async function loadDiff() {
     return det;
   });
   $("#diff-stat").textContent = files.length ? `${files.length} file${files.length > 1 ? "s" : ""} · +${adds} −${dels}` : "";
-  out.replaceChildren(...(nodes.length ? nodes : [el("div", "empty", "No changes yet.")]));
+  $("#diff-stat").classList.toggle("live", live);
+  out.replaceChildren(...(nodes.length ? nodes : [el("div", "empty", live ? "No changes yet. They'll show here as the agent makes them." : "No changes yet.")]));
+  pane.scrollTop = top;
   $("#diff-actions").hidden = !files.length;
   const notes = [];
   if (d.behind) notes.push(el("p", "note", `${d.from} has ${d.behind} new commit${d.behind > 1 ? "s" : ""} this agent doesn't have yet. They're merged in when it runs, or press Sync to merge them now.`));
@@ -867,6 +918,17 @@ let summaryTimer = 0;
 const scheduleSummary = () => { summaryTimer ||= setTimeout(() => { summaryTimer = 0; refreshSummary(); }, 150); };
 
 // tick the "working for" timers without refetching anything
+// liveDiff keeps the Diff tab current while its agent works: on the agent's own activity, and every
+// few seconds for agents that don't report file edits. A hunk selection in progress is never wiped.
+let liveDiffTimer = 0;
+function scheduleLiveDiff() {
+  liveDiffTimer ||= setTimeout(() => {
+    liveDiffTimer = 0;
+    if (tab === "diff" && selected && !selectedHunks().length) loadDiff();
+  }, 1000);
+}
+setInterval(() => { if (tab === "diff" && BUSY.includes(summary.agents[selected]?.status)) scheduleLiveDiff(); }, 3000);
+
 setInterval(() => {
   for (const t of $$("#canvas .elapsed")) t.textContent = fmtDur(Date.now() - Number(t.dataset.since));
   if (selected && BUSY.includes(summary.agents[selected]?.status)) renderStats();
@@ -886,6 +948,7 @@ es.onmessage = m => {
       if (now) now.textContent = `${e.kind}: ${e.text}`;
     }
     if (e.agent === selected && tab === "logs") appendLive(e);
+    if (e.agent === selected && e.kind !== "stderr") scheduleLiveDiff(); // it edited files, ran a tool, checkpointed...
   } else if (msg.type === "status" || msg.type === "usage") {
     if (msg.type === "status") setStatus(msg.agent, msg.status);
     scheduleSummary();

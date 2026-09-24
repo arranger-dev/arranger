@@ -22,10 +22,10 @@ One agent with one huge prompt drifts, forgets, and claims success. A team with 
 macOS and Linux (amd64 and arm64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/arranger-dev/arranger/main/install.sh | sh
+curl -fsSL https://arranger.dev/install.sh | sh
 ```
 
-This downloads the latest release, verifies its checksum, and puts `arranger` in `/usr/local/bin`. Set `INSTALL_DIR` to install somewhere else, or `ARRANGER_VERSION=v0.3.0` to pin a version.
+This downloads the latest release, verifies its checksum, and puts `arranger` in `~/.local/bin` (no sudo; it tells you if that folder isn't on your `PATH` yet). Set `INSTALL_DIR` to install somewhere else, or `ARRANGER_VERSION=v0.3.0` to pin a version.
 
 From source (Go 1.26+):
 
