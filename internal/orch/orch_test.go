@@ -297,3 +297,101 @@ func TestStopAll(t *testing.T) {
 		t.Fatalf("status %q, want stopped", g.Status)
 	}
 }
+
+// Asking a manager for a change after its team worked re-runs only the reports the change
+// concerns: they keep their goal and work, get their part of the change (and any check that
+// proves it), and the result is reviewed, merged and checked like any run.
+func TestRequestChanges(t *testing.T) {
+	o := setup(t)
+	plain := func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} }
+	agents.Runtimes["fakemgr"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+		return []string{"-c", `p=$(cat)
+case "$p" in
+*"WHAT EACH ONE ALREADY DID"*) echo '{"changes":[{"agent":"a","change":"write A in capitals","checks":["grep -q A a.txt"]}]}' ;;
+*"YOUR TEAM:"*) echo '{"subgoals":[{"agent":"a","title":"write a","checks":["test -f a.txt"]},{"agent":"b","title":"write b","checks":["test -f b.txt"]}]}' ;;
+*"change the user asked for: write A in capitals"*) echo '{"verdicts":[{"agent":"a","accept":true}]}' ;;
+*) echo '{"verdicts":[{"agent":"a","accept":true},{"agent":"b","accept":true}]}' ;;
+esac`}
+	}}
+	agents.Runtimes["fakeworker"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+		return []string{"-c", `p=$(cat)
+case "$p" in
+*"USER ASKS FOR THESE CHANGES"*"write A in capitals"*) echo A > a.txt ;;
+*"You are Alpha"*) echo a > a.txt ;;
+*) echo b > b.txt ;;
+esac`}
+	}}
+	defer delete(agents.Runtimes, "fakemgr")
+	defer delete(agents.Runtimes, "fakeworker")
+
+	repo := newRepo(t)
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{
+		{ID: "m", Name: "Lead", Role: "manager", Runtime: "fakemgr"},
+		{ID: "a", Name: "Alpha", Role: "coder", Parent: "m", Runtime: "fakeworker"},
+		{ID: "b", Name: "Beta", Role: "coder", Parent: "m", Runtime: "fakeworker"},
+	})
+	o.Store.SaveGoal("m", store.Goal{Title: "both files", Checks: "test -f a.txt && test -f b.txt"})
+	if err := o.Revise("m", "  "); err == nil {
+		t.Fatal("an empty change request should be refused")
+	}
+	if err := o.Start("m"); err != nil {
+		t.Fatal(err)
+	}
+	if g := waitDone(t, o, "m"); g.Status != "done" {
+		t.Fatalf("first run: %+v", g)
+	}
+
+	if err := o.Revise("m", "Alpha's file should say A, in capitals"); err != nil {
+		t.Fatal(err)
+	}
+	if g := waitDone(t, o, "m"); g.Status != "done" {
+		es, _ := o.Store.Events("m", 50)
+		t.Fatalf("revision: %+v\nevents: %+v", g, es)
+	}
+	var runsA, runsB int
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id='a'`).Scan(&runsA)
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id='b'`).Scan(&runsB)
+	if runsA != 2 || runsB != 1 {
+		t.Fatalf("only Alpha should re-run: runs a=%d b=%d", runsA, runsB)
+	}
+	if ga, _ := o.Store.Goal("a"); ga.Title != "write a" || !strings.Contains(ga.Checks, "grep -q A a.txt") || !strings.Contains(ga.Checks, "test -f a.txt") {
+		t.Fatalf("Alpha keeps its goal and gains the change's check: %+v", ga)
+	}
+	if out, _ := git.Run(repo, "show", "arranger/m:a.txt"); strings.TrimSpace(out) != "A" {
+		t.Fatalf("the change should be merged into the manager: a.txt = %q", out)
+	}
+	if _, err := git.Run(repo, "cat-file", "-e", "arranger/m:b.txt"); err != nil {
+		t.Fatal("Beta's earlier work should still be there")
+	}
+	var revisions int
+	o.Store.SQL().QueryRow(`SELECT count(*) FROM decisions WHERE agent_id='m' AND kind='revision'`).Scan(&revisions)
+	es, _ := o.Store.Events("m", 100)
+	asked := false
+	for _, e := range es {
+		asked = asked || e.Kind == "request" && strings.Contains(e.Text, "in capitals")
+	}
+	if revisions != 1 || !asked {
+		t.Fatalf("the request and the manager's routing should be on record: revisions=%d asked=%v", revisions, asked)
+	}
+}
+
+func TestValidateRevision(t *testing.T) {
+	team := map[string]store.Agent{"a": {ID: "a"}, "b": {ID: "b"}}
+	goals := map[string]store.Goal{"a": {Title: "x"}}
+	ok := []revision{{Agent: "a", Change: "do y"}}
+	if err := validateRevision(ok, team, goals); err != nil {
+		t.Fatal(err)
+	}
+	for name, cs := range map[string][]revision{
+		"none":      nil,
+		"stranger":  {{Agent: "z", Change: "y"}},
+		"twice":     {{Agent: "a", Change: "y"}, {Agent: "a", Change: "z"}},
+		"empty":     {{Agent: "a", Change: " "}},
+		"never ran": {{Agent: "b", Change: "y"}},
+	} {
+		if validateRevision(cs, team, goals) == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

@@ -117,14 +117,46 @@ type FileDiff struct {
 	Hunks  []Hunk   `json:"hunks"`
 }
 
-// RawDiff is everything the agent changed since it branched off base, committed or not.
-// ponytail: new files show once they're checkpointed (untracked files aren't in git diff).
+// maxNewFile caps the size of a new, uncommitted file shown in a diff; bigger ones (build output,
+// data dumps) are left out until they're committed.
+const maxNewFile = 1 << 20
+
+// maxNewFiles caps how many new, uncommitted files a diff shows.
+const maxNewFiles = 200
+
+// RawDiff is everything the agent changed since it branched off base: committed, uncommitted,
+// and new files git doesn't track yet, so the diff can be watched while the agent works.
+// It only reads, without taking git's optional locks, so it never gets in a running agent's way.
 func RawDiff(dir, base string) (string, error) {
-	mb, err := Run(dir, "merge-base", base, "HEAD")
+	mb, err := Run(dir, "--no-optional-locks", "merge-base", base, "HEAD")
 	if err != nil {
 		return "", err
 	}
-	return Run(dir, "diff", "--no-color", "--no-ext-diff", strings.TrimSpace(mb))
+	out, err := Run(dir, "--no-optional-locks", "diff", "--no-color", "--no-ext-diff", strings.TrimSpace(mb))
+	if err != nil {
+		return "", err
+	}
+	news, _ := Run(dir, "--no-optional-locks", "ls-files", "--others", "--exclude-standard", "-z")
+	var b strings.Builder
+	b.WriteString(out)
+	n := 0
+	for _, f := range strings.Split(news, "\x00") {
+		if st, err := os.Stat(filepath.Join(dir, f)); f == "" || err != nil || !st.Mode().IsRegular() || st.Size() > maxNewFile {
+			continue
+		}
+		if n++; n > maxNewFiles {
+			break
+		}
+		b.WriteString(newFileDiff(dir, f))
+	}
+	return b.String(), nil
+}
+
+// newFileDiff is the diff that adds untracked file f, in the same form git shows for a committed one.
+func newFileDiff(dir, f string) string {
+	cmd := exec.Command("git", "-C", dir, "--no-optional-locks", "diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", f)
+	out, _ := cmd.Output() // exits 1 when the files differ, which they always do here
+	return string(out)
 }
 
 // Diff is RawDiff split into files and hunks.

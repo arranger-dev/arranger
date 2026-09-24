@@ -20,6 +20,13 @@ type subgoal struct {
 	Checks   []string `json:"checks"`
 }
 
+// revision is one report's part of a change the user asked for.
+type revision struct {
+	Agent  string   `json:"agent"`
+	Change string   `json:"change"`
+	Checks []string `json:"checks"` // optional extra checks that prove the change
+}
+
 type verdict struct {
 	Agent    string `json:"agent"`
 	Accept   bool   `json:"accept"`
@@ -28,18 +35,30 @@ type verdict struct {
 
 // runManager plans subgoals for its children, runs them in parallel, reviews and merges
 // their verified work into its own branch, then runs its own checks on the merged result.
+// Asked for a change after its team already worked, it re-runs only the reports the change
+// concerns, each with its part of it, instead of planning again.
 func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback string) string {
 	st := j.o.Store
 	j.status("planning", nil)
 	byID := map[string]store.Agent{}
+	goals := map[string]store.Goal{}
+	planned := false
 	for _, k := range kids {
 		byID[k.ID] = k
+		goals[k.ID], _ = st.Goal(k.ID)
+		planned = planned || goals[k.ID].Title != ""
 	}
 
-	// 1. plan
-	var plan struct{ Subgoals []subgoal }
+	// 1. plan, or route the requested change to the reports it concerns
 	j.newRun(1)
-	err := j.decide(planPrompt(j.a, g, kids, feedback), dir, &plan, func() error { return validatePlan(plan.Subgoals, byID) })
+	var team []store.Agent
+	var err error
+	changes := map[string]string{} // report id -> its part of the requested change
+	if j.change != "" && planned {
+		team, err = j.revise(g, dir, kids, byID, goals, feedback, changes)
+	} else {
+		team, err = j.plan(g, dir, kids, byID, feedback)
+	}
 	if j.ctx.Err() != nil {
 		return j.fail("stopped", "stopped by user")
 	}
@@ -49,20 +68,12 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 	if err != nil {
 		return j.fail("failed", "no valid plan: "+err.Error())
 	}
-	st.AddDecision(j.a.ID, "plan", plan)
-	var team []store.Agent
-	for _, s := range plan.Subgoals {
-		st.SaveGoal(s.Agent, store.Goal{Title: s.Title, Body: s.Body, Criteria: s.Criteria, Checks: strings.Join(s.Checks, "\n")})
-		st.SetGoal(s.Agent, map[string]any{"status": "idle", "attempts": 0, "feedback": "", "passed": 0, "total": 0})
-		team = append(team, byID[s.Agent])
-		j.emit("plan", fmt.Sprintf("%s → %s (checks: %s)", byID[s.Agent].Name, s.Title, strings.Join(s.Checks, "; ")), "")
-	}
 
 	// 2. run children, review, merge; rejected children re-run with the review feedback
 	fb := map[string]string{}
 	for round := 1; len(team) > 0; round++ {
 		j.status("waiting", nil)
-		results := runChildren(j, team, fb)
+		results := runChildren(j, team, fb, changes)
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
 		}
@@ -81,7 +92,7 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 
 		j.status("reviewing", nil)
 		j.newRun(round)
-		verdicts, err := j.review(g, dir, done)
+		verdicts, err := j.review(g, dir, done, changes)
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
 		}
@@ -128,8 +139,99 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 	return j.status("done", map[string]any{"feedback": ""})
 }
 
+// plan splits the manager's goal into a subgoal per report and saves them as their goals.
+func (j *job) plan(g store.Goal, dir string, kids []store.Agent, byID map[string]store.Agent, feedback string) ([]store.Agent, error) {
+	var plan struct{ Subgoals []subgoal }
+	err := j.decide(planPrompt(j.a, g, kids, feedback, j.change), dir, &plan, func() error { return validatePlan(plan.Subgoals, byID) })
+	if err != nil {
+		return nil, err
+	}
+	st := j.o.Store
+	st.AddDecision(j.a.ID, "plan", plan)
+	var team []store.Agent
+	for _, s := range plan.Subgoals {
+		st.SaveGoal(s.Agent, store.Goal{Title: s.Title, Body: s.Body, Criteria: s.Criteria, Checks: strings.Join(s.Checks, "\n")})
+		st.SetGoal(s.Agent, map[string]any{"status": "idle", "attempts": 0, "feedback": "", "passed": 0, "total": 0})
+		team = append(team, byID[s.Agent])
+		j.emit("plan", fmt.Sprintf("%s → %s (checks: %s)", byID[s.Agent].Name, s.Title, strings.Join(s.Checks, "; ")), "")
+	}
+	return team, nil
+}
+
+// revise asks the manager which reports the user's change concerns and what each must do. Those
+// reports keep their goals (plus any check that proves the change) and are the only ones re-run.
+func (j *job) revise(g store.Goal, dir string, kids []store.Agent, byID map[string]store.Agent, goals map[string]store.Goal,
+	feedback string, changes map[string]string) ([]store.Agent, error) {
+	var rev struct{ Changes []revision }
+	err := j.decide(revisePrompt(j.a, g, kids, goals, j.change, feedback), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
+	if err != nil {
+		return nil, err
+	}
+	st := j.o.Store
+	st.AddDecision(j.a.ID, "revision", rev)
+	var team []store.Agent
+	for _, c := range rev.Changes {
+		kg := goals[c.Agent]
+		if added := addChecks(&kg, c.Checks); len(added) > 0 {
+			st.SaveGoal(c.Agent, kg)
+		}
+		st.SetGoal(c.Agent, map[string]any{"status": "idle", "attempts": 0, "feedback": "", "passed": 0, "total": 0})
+		changes[c.Agent] = c.Change
+		team = append(team, byID[c.Agent])
+		msg := fmt.Sprintf("%s → change: %s", byID[c.Agent].Name, c.Change)
+		if len(c.Checks) > 0 {
+			msg += " (new checks: " + strings.Join(c.Checks, "; ") + ")"
+		}
+		j.emit("plan", msg, "")
+	}
+	return team, nil
+}
+
+// addChecks appends the checks g doesn't have yet and returns them.
+func addChecks(g *store.Goal, checks []string) []string {
+	have := map[string]bool{}
+	for _, c := range lines(g.Checks) {
+		have[c] = true
+	}
+	var added []string
+	for _, c := range lines(strings.Join(checks, "\n")) {
+		if !have[c] {
+			have[c] = true
+			added = append(added, c)
+		}
+	}
+	if len(added) > 0 {
+		g.Checks = strings.TrimSpace(g.Checks + "\n" + strings.Join(added, "\n"))
+	}
+	return added
+}
+
+func validateRevision(cs []revision, team map[string]store.Agent, goals map[string]store.Goal) error {
+	if len(cs) == 0 {
+		return errors.New("no member got a change; give the change to the members whose work it concerns")
+	}
+	seen := map[string]bool{}
+	for _, c := range cs {
+		if _, ok := team[c.Agent]; !ok {
+			return fmt.Errorf("%q is not on your team", c.Agent)
+		}
+		if seen[c.Agent] {
+			return fmt.Errorf("%s got two changes; merge them into one", c.Agent)
+		}
+		seen[c.Agent] = true
+		if strings.TrimSpace(c.Change) == "" {
+			return fmt.Errorf("the change for %s is empty", c.Agent)
+		}
+		if goals[c.Agent].Title == "" {
+			return fmt.Errorf("%s has no subgoal yet, so it has no work to change", c.Agent)
+		}
+	}
+	return nil
+}
+
 // runChildren executes the given children in parallel and returns each one's final status.
-func runChildren(j *job, kids []store.Agent, feedback map[string]string) map[string]string {
+// changes holds each child's part of a change the user asked for, if any.
+func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string) map[string]string {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	res := map[string]string{}
@@ -140,7 +242,7 @@ func runChildren(j *job, kids []store.Agent, feedback map[string]string) map[str
 			res[k.ID] = "already running"
 			continue
 		}
-		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k}
+		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k, change: changes[k.ID]}
 		kj.status("starting", nil) // the hand-off shows on the canvas at once, not after the worktree is ready
 		wg.Add(1)
 		go func(k store.Agent) {
@@ -179,10 +281,10 @@ func (j *job) decide(prompt, dir string, v any, valid func() error) error {
 	}
 }
 
-func (j *job) review(g store.Goal, dir string, ids []string) (map[string]verdict, error) {
+func (j *job) review(g store.Goal, dir string, ids []string, changes map[string]string) (map[string]verdict, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are %s, a manager reviewing your team's work toward: %s\n", j.a.Name, g.Title)
-	b.WriteString("Every item below already passed its checks. Judge the substance: accept only if the change does what its subgoal asks, meets its criteria, and changes nothing unrelated. When you reject, say exactly what to fix.\n")
+	b.WriteString("Every item below already passed its checks. Judge the substance: accept only if the change does what its subgoal asks, meets its criteria, and changes nothing unrelated. Where the user asked for a change, accept only if it was made. When you reject, say exactly what to fix.\n")
 	for _, id := range ids {
 		k, _, _ := j.o.Store.Agent(id)
 		kg, _ := j.o.Store.Goal(id)
@@ -193,7 +295,11 @@ func (j *job) review(g store.Goal, dir string, ids []string) (map[string]verdict
 		if len(d) > maxDiffInReview {
 			d = d[:maxDiffInReview] + "\n… (diff truncated)"
 		}
-		fmt.Fprintf(&b, "\n=== agent %q (%s)\nsubgoal: %s\ncriteria: %s\ndiff:\n%s\n", id, k.Name, kg.Title, kg.Criteria, d)
+		fmt.Fprintf(&b, "\n=== agent %q (%s)\nsubgoal: %s\ncriteria: %s\n", id, k.Name, kg.Title, kg.Criteria)
+		if c := changes[id]; c != "" {
+			fmt.Fprintf(&b, "change the user asked for: %s\n", c)
+		}
+		fmt.Fprintf(&b, "diff:\n%s\n", d)
 	}
 	b.WriteString("\nReply with ONLY a JSON object, no prose:\n" + `{"verdicts":[{"agent":"<id>","accept":true,"feedback":""}]}`)
 

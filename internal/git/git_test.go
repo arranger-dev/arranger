@@ -275,3 +275,42 @@ func TestSync(t *testing.T) {
 		t.Fatalf("agent's a.txt changed: %q", b)
 	}
 }
+
+// New files show in the diff while the agent is still working, before any checkpoint commits them,
+// and hunk remove works on them.
+func TestDiffShowsUncommittedNewFiles(t *testing.T) {
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("build/\n"), 0o644)
+	Commit(repo, "ignore build")
+	dir, _ := EnsureWorktree(t.TempDir(), repo, "main", "a")
+	os.MkdirAll(filepath.Join(dir, "pkg"), 0o755)
+	os.WriteFile(filepath.Join(dir, "pkg", "deep.go"), []byte("package pkg\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n2\n"), 0o644) // an edit, uncommitted
+	os.MkdirAll(filepath.Join(dir, "build"), 0o755)
+	os.WriteFile(filepath.Join(dir, "build", "out.bin"), []byte("ignored"), 0o644)  // .gitignore'd
+	os.WriteFile(filepath.Join(dir, "huge.log"), make([]byte, maxNewFile+1), 0o644) // too big to show
+
+	fs, err := Diff(dir, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]FileDiff{}
+	for _, f := range fs {
+		paths[f.Path] = f
+	}
+	if len(fs) != 2 || paths["pkg/deep.go"].Adds != 1 || len(paths["pkg/deep.go"].Hunks) != 1 || paths["a.txt"].Adds != 1 {
+		t.Fatalf("want a.txt and pkg/deep.go, got %+v", fs)
+	}
+	if st, _ := Run(repo, "status", "--porcelain"); strings.TrimSpace(st) != "" {
+		t.Fatalf("reading a worktree's diff must not change the repo: %q", st)
+	}
+
+	// removing the new file's hunk deletes it, like any other change
+	patch, _ := HunkPatch(fs, map[string]bool{paths["pkg/deep.go"].Hunks[0].ID: true})
+	if _, err := RunIn(dir, patch, "apply", "-R", "-"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pkg", "deep.go")); !os.IsNotExist(err) {
+		t.Fatal("removing the hunk should delete the new file")
+	}
+}

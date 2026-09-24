@@ -56,7 +56,9 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
 
 5. **Run.** Press **Run**. A manager plans one subgoal (with its own checks) for each report, runs them in parallel, reviews and merges their work into its own branch, then runs its own checks. Links on the canvas animate while agents hand work down and report back. The **Logs** tab streams what each agent is doing.
 
-6. **Review and merge.** Open the **Diff** tab to see every change, remove or promote single hunks, or revert a checkpoint. When you're happy, press **Merge…** to merge the agent's branch into `main` (or any branch, created if needed) as a merge commit, a squash, or a fast-forward.
+6. **Iterate.** Not quite right? Select the agent and write what should change in **Request changes**. Ask the top manager and it passes each part to the agents it concerns and re-runs only them; everyone keeps their work, and the changes are reviewed, merged and checked like any run. (**Run** plans again from the goal instead.)
+
+7. **Review and merge.** Open the **Diff** tab to see every change, remove or promote single hunks, or revert a checkpoint. When you're happy, press **Merge…** to merge the agent's branch into `main` (or any branch, created if needed) as a merge commit, a squash, or a fast-forward.
 
 **Stats** in the header shows cost, tokens, time and first-try success, per agent and per runtime.
 

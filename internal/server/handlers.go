@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"arranger/internal/agents"
 	"arranger/internal/git"
@@ -160,6 +161,19 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// revise re-runs an agent to make the change the user describes (see Orchestrator.Revise).
+func (s *Server) revise(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Change string }
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if err := s.o.Revise(r.PathValue("id"), req.Change); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	s.o.Stop(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
@@ -223,10 +237,13 @@ func (s *Server) saveType(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.ID = r.PathValue("id") // "" on create
-	t.Name = strings.ToLower(strings.TrimSpace(t.Name))
+	// keep the name as typed ("Frontend Guy"), minus stray whitespace
+	t.Name = strings.Join(strings.Fields(t.Name), " ")
 	switch _, ok := agents.Runtimes[t.Runtime]; {
-	case !safeID.MatchString(t.Name):
-		http.Error(w, "type name: letters, digits, - or _ only", http.StatusBadRequest)
+	case t.Name == "" || utf8.RuneCountInString(t.Name) > 40:
+		http.Error(w, "type name: 1 to 40 characters", http.StatusBadRequest)
+	case s.typeNameTaken(t):
+		http.Error(w, "there's already a type called "+t.Name, http.StatusBadRequest)
 	case !colorRe.MatchString(t.Color):
 		http.Error(w, "color must look like #3d6fe0", http.StatusBadRequest)
 	case !ok:
@@ -238,6 +255,17 @@ func (s *Server) saveType(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, t)
 	}
+}
+
+// typeNameTaken reports whether another type already has t's name, ignoring case.
+func (s *Server) typeNameTaken(t store.AgentType) bool {
+	ts, _ := s.st.Types()
+	for _, o := range ts {
+		if o.ID != t.ID && strings.EqualFold(o.Name, t.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) deleteType(w http.ResponseWriter, r *http.Request) {

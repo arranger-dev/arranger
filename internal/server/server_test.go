@@ -255,14 +255,17 @@ func TestProjectsArrangementAndSettings(t *testing.T) {
 
 func TestTypesAPI(t *testing.T) {
 	a := newApp(t)
-	a.must(400, "POST", "/api/types", `{"name":"bad name","color":"#000000","runtime":"claude"}`)
+	a.must(400, "POST", "/api/types", `{"name":"  ","color":"#000000","runtime":"claude"}`)
+	a.must(400, "POST", "/api/types", `{"name":"`+strings.Repeat("x", 41)+`","color":"#000000","runtime":"claude"}`)
 	a.must(400, "POST", "/api/types", `{"name":"sec","color":"red","runtime":"claude"}`)
 	var ty store.AgentType
-	json.Unmarshal([]byte(a.must(200, "POST", "/api/types", `{"name":"Sec","color":"#d64545","runtime":"opencode"}`)), &ty)
-	if ty.ID == "" || ty.Name != "sec" {
+	// names keep their spaces and capitals
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/types", `{"name":"  Frontend   Guy ","color":"#d64545","runtime":"opencode"}`)), &ty)
+	if ty.ID == "" || ty.Name != "Frontend Guy" {
 		t.Fatalf("type: %+v", ty)
 	}
-	a.must(200, "PUT", "/api/types/"+ty.ID, `{"name":"sec","color":"#000000","runtime":"opencode"}`)
+	a.must(400, "POST", "/api/types", `{"name":"frontend guy","color":"#000000","runtime":"claude"}`)         // taken, ignoring case
+	a.must(200, "PUT", "/api/types/"+ty.ID, `{"name":"Frontend guy","color":"#000000","runtime":"opencode"}`) // renaming itself is fine
 	a.must(204, "DELETE", "/api/types/"+ty.ID, "")
 	if ts, _ := a.st.Types(); len(ts) != 0 {
 		t.Fatal("type not deleted")
@@ -466,5 +469,34 @@ func TestSyncWithBaseBranch(t *testing.T) {
 		if strings.HasPrefix(f.Path, "user") {
 			t.Fatalf("upstream file %s shows as the agent's change", f.Path)
 		}
+	}
+}
+
+// Request changes re-runs an agent with the user's change; an empty request is refused.
+func TestRequestChangesAPI(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, "say.sh"), []byte("grep -q CAPS && echo LOUD > out.txt || echo quiet > out.txt\n"), 0o644)
+	git.Commit(repo, "add say.sh")
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"sh say.sh"}`) // reads the prompt on stdin
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"write out.txt","checks":"test -f out.txt"}`)
+	wait := func() {
+		for a.o.IsRunning("k") {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	a.must(202, "POST", "/api/agents/k/run", "")
+	wait()
+	a.must(400, "POST", "/api/agents/k/revise", `{"change":"  "}`)
+	a.must(202, "POST", "/api/agents/k/revise", `{"change":"say it in CAPS"}`)
+	wait()
+	if out, _ := os.ReadFile(filepath.Join(a.o.Dir("k"), "out.txt")); strings.TrimSpace(string(out)) != "LOUD" {
+		t.Fatalf("the agent should get the change in its prompt: out.txt = %q", out)
+	}
+	if g, _ := a.st.Goal("k"); g.Status != "done" || g.Title != "write out.txt" {
+		t.Fatalf("goal kept, run done: %+v", g)
 	}
 }

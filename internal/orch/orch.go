@@ -181,7 +181,19 @@ func checkGoal(a store.Agent, g store.Goal) error {
 }
 
 // Start validates a run and starts it in the background. A manager runs its whole subtree.
-func (o *Orchestrator) Start(agentID string) error {
+func (o *Orchestrator) Start(agentID string) error { return o.start(agentID, "") }
+
+// Revise re-runs an agent that already worked, to make the change the user describes. A worker
+// keeps its work and makes the change; a manager passes each part of it to the reports it
+// concerns and re-runs only those, then reviews, merges and checks as usual.
+func (o *Orchestrator) Revise(agentID, change string) error {
+	if change = strings.TrimSpace(change); change == "" {
+		return errors.New("describe what should change")
+	}
+	return o.start(agentID, change)
+}
+
+func (o *Orchestrator) start(agentID, change string) error {
 	a, pid, err := o.Store.Agent(agentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("agent %s not found; save the arrangement first", agentID)
@@ -207,7 +219,10 @@ func (o *Orchestrator) Start(agentID string) error {
 		cancel()
 		return fmt.Errorf("%s is already running", a.Name)
 	}
-	j := &job{o: o, ctx: ctx, p: p, a: a}
+	j := &job{o: o, ctx: ctx, p: p, a: a, change: change}
+	if change != "" {
+		j.emit("request", "you asked for changes: "+change, "")
+	}
 	j.status("starting", nil) // before returning, so the page shows it working right away
 	go func() {
 		defer o.unregister(agentID)
@@ -224,6 +239,10 @@ type job struct {
 	p   store.Project
 	a   store.Agent
 	run int64 // current runs.id, tags events
+
+	// change is what the user asked to change since the last run (or, for a report, the part of
+	// it its manager passed down). "" for a plain run from the goal.
+	change string
 
 	used      int  // tokens this run, across attempts
 	warned    bool // soft limit already reported
@@ -299,7 +318,7 @@ func runWorker(j *job, g store.Goal, dir, feedback string) string {
 		j.newRun(attempt)
 		j.emit("msg", fmt.Sprintf("attempt %d/%d with %s", attempt, maxAttempts, j.a.Runtime), "")
 
-		_, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback), dir)
+		_, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change), dir)
 		if sha, err := git.Commit(dir, fmt.Sprintf("arranger: %s attempt %d", j.a.Name, attempt)); err != nil {
 			j.emit("error", err.Error(), "")
 		} else if sha != "" {
