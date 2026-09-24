@@ -34,6 +34,7 @@ button { background: var(--panel); border: 1px solid var(--line); padding: 5px 1
 button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button.danger { color: var(--failed); }
+button.primary.danger { background: var(--failed); border-color: var(--failed); color: #fff; }
 input, select, textarea { background: var(--panel); border: 1px solid var(--line); padding: 6px 8px; width: 100%; }
 textarea { resize: vertical; min-height: 60px; }
 .mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
@@ -133,7 +134,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .istats .warn { color: var(--verifying); } .istats .over { color: var(--failed); }
 #inspector[hidden] { display: none; }
 .ihead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
-.ihead .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ihead .name { font-weight: 600; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#i-dir { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); color: var(--muted); cursor: copy; }
 .tabs { display: flex; border-bottom: 1px solid var(--line); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 8px 14px; color: var(--muted); }
 .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
@@ -255,7 +257,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <span class="grow"></span>
   {{with .Version}}<p class="about" id="version" title="{{.String}}{{if .Commit}}&#10;commit {{.Commit}}{{end}}">
     <b>arranger {{if .ReleaseURL}}<a href="{{.ReleaseURL}}" target="_blank" rel="noopener" title="Release notes">{{.Version}}</a>{{else}}{{.Version}}{{end}}</b>
-    {{if .Short}}<br>commit {{if .CommitURL}}<a href="{{.CommitURL}}" target="_blank" rel="noopener">{{.Short}}</a>{{else}}{{.Short}}{{end}}{{if .Dirty}}<span class="bad">+dirty</span>{{end}}{{end}}
+    {{if .Short}}<br>commit {{if .CommitURL}}<a href="{{.CommitURL}}" target="_blank" rel="noopener">{{.Short}}</a>{{else}}{{.Short}}{{end}}{{end}}
     {{if .When}}<br>{{.When}}{{end}}
     <br>{{.Go}} · <a href="{{$.Repo}}/releases" target="_blank" rel="noopener">all releases</a>
   </p>{{end}}
@@ -268,6 +270,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div class="ihead">
     <span class="st" id="i-status" data-status="idle"></span>
     <span class="name" id="i-name"></span>
+    <span id="i-dir"></span>
     <button id="i-clone" title="Add a copy of this agent (same settings and manager, no goal)">Clone</button>
     <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
     <button id="i-run" class="primary">Run</button>
@@ -376,6 +379,14 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <div id="m-preview"></div>
     <div class="row"><button class="primary" value="merge" id="m-go">Merge</button><button value="cancel" formnovalidate>Close</button></div>
     <p class="status" id="m-msg" role="status"></p>
+  </form>
+</dialog>
+
+<dialog id="confirm-dialog">
+  <form method="dialog">
+    <h3></h3>
+    <p class="hint" id="c-text"></p>
+    <div class="row"><button class="primary danger" value="ok" id="c-ok"></button><button value="cancel" id="c-cancel">Cancel</button></div>
   </form>
 </dialog>
 

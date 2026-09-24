@@ -233,10 +233,28 @@ main.addEventListener("pointerdown", e => {
     main.classList.remove("panning");
   };
 });
-canvas.addEventListener("click", e => {
+// ask shows the styled confirm dialog and resolves true when the user presses the action button.
+function ask(title, text, action) {
+  const d = $("#confirm-dialog");
+  $("h3", d).textContent = title;
+  $("#c-text").textContent = text;
+  $("#c-text").hidden = !text;
+  $("#c-ok").textContent = action;
+  d.returnValue = "";
+  d.showModal();
+  $("#c-cancel").focus(); // Enter shouldn't delete by accident
+  return new Promise(r => d.addEventListener("close", () => r(d.returnValue === "ok"), { once: true }));
+}
+
+canvas.addEventListener("click", async e => {
   if (!e.target.classList.contains("x")) return;
   const id = e.target.closest(".card").dataset.id, a = agents.get(id);
   if (BUSY.includes(a.el.dataset.status)) { say(`${a.name} is running; stop it before removing it`, true); return; }
+  const n = kidsOf(id).length;
+  if (!await ask(`Remove ${a.name}?`, n
+    ? `Its ${n === 1 ? "report moves" : `${n} reports move`} up to ${a.parent ? nameOf(a.parent) : "the top level"}.`
+    : "", "Remove")) return;
+  if (!agents.has(id)) return; // removed some other way while the dialog was open
   kidsOf(id).forEach(k => k.parent = a.parent); // reports move up a level
   if (selected === id) closeInspector();
   a.el.remove();
@@ -306,6 +324,7 @@ tform.onsubmit = async e => {
   e.preventDefault();
   try {
     if (action === "delete") {
+      if (!await ask(`Delete the ${editingType.name} type?`, "You can't drag new agents from it anymore. Agents already on the canvas keep their settings.", "Delete")) return;
       await api("DELETE", `/api/types/${editingType.id}`);
       TYPES.delete(editingType.name);
     } else {
@@ -430,6 +449,13 @@ function fillParents(id) {
   sel.value = parentOf(id) ?? "";
 }
 
+$("#i-dir").onclick = async e => {
+  const path = e.currentTarget.dataset.path;
+  if (!path) return;
+  try { await navigator.clipboard.writeText(path); say("Copied " + path); }
+  catch { say("Couldn't copy the path", true); }
+};
+
 async function select(id) {
   let data;
   try { data = await api("GET", `/api/agents/${encodeURIComponent(id)}`); }
@@ -440,6 +466,10 @@ async function select(id) {
   insp.hidden = false;
   const { agent: a, goal: g } = data;
   $("#i-name").textContent = a.name;
+  const d = $("#i-dir");
+  d.textContent = data.dir ? `(${data.dir})` : "";
+  d.dataset.path = data.dir;
+  d.title = data.dir ? `Worktree on branch ${data.branch}. Click to copy the path.` : "";
   for (const k of ["title", "body", "criteria", "checks"]) gform.elements[k].value = g[k];
   for (const k of ["name", "runtime", "model", "args", "prompt"]) aform.elements[k].value = a[k];
   aform.elements.tokenSoft.value = a.tokenSoft || "";

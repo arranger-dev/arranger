@@ -114,7 +114,17 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, map[string]any{"agent": a, "goal": g})
+	// dir is where the agent works, "" until its first run made the worktree
+	dir, shown := s.o.Dir(a.ID), ""
+	if _, err := os.Stat(dir); err == nil {
+		shown = dir
+		if home, err := os.UserHomeDir(); err == nil {
+			if rest, ok := strings.CutPrefix(dir, home+string(filepath.Separator)); ok {
+				shown = "~/" + rest
+			}
+		}
+	}
+	writeJSON(w, map[string]any{"agent": a, "goal": g, "dir": shown, "branch": git.BranchOf(a.ID)})
 }
 
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
