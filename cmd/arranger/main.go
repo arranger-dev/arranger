@@ -18,6 +18,7 @@ import (
 	"arranger/internal/orch"
 	"arranger/internal/server"
 	"arranger/internal/store"
+	"arranger/internal/version"
 )
 
 func main() {
@@ -27,7 +28,12 @@ func main() {
 	parallel := flag.Int("parallel", 4, "max agent processes running at once")
 	level := flag.String("log", "info", "log level: debug, info, warn or error")
 	jsonLogs := flag.Bool("log-json", false, "log JSON lines instead of readable text")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version.Get())
+		return
+	}
 
 	lg, err := newLogger(*level, *jsonLogs)
 	if err != nil {
@@ -50,7 +56,9 @@ func main() {
 	loopback := host == "localhost" || ip != nil && ip.IsLoopback()
 	srv := &http.Server{Addr: *addr, Handler: server.New(st, o, loopback)}
 	go func() {
-		lg.Info("arranger listening", zap.String("url", "http://"+*addr), zap.String("data", *data), zap.Int("parallel", *parallel))
+		v := version.Get()
+		lg.Info("arranger listening", zap.String("url", "http://"+*addr), zap.String("version", v.Version), zap.String("commit", v.Short()),
+			zap.String("data", *data), zap.Int("parallel", *parallel))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			lg.Fatal("serve", zap.Error(err))
 		}

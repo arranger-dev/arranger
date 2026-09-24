@@ -58,9 +58,15 @@ header select { width: auto; }
 #msg { font-size: 12px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #msg.err { color: var(--failed); }
 
-aside#palette { border-right: 1px solid var(--line); padding: 12px; overflow: auto; }
+aside#palette { border-right: 1px solid var(--line); padding: 12px; overflow: auto; display: flex; flex-direction: column; }
+aside#palette > * { flex-shrink: 0; } /* a column, not a squeeze: it scrolls when it's too tall */
 h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 16px; }
+aside#palette .hint { margin-bottom: 0; } /* flex items don't collapse margins; keep the old spacing */
+aside#palette > .grow { flex: 1 0 20px; } /* pushes the version to the bottom, keeping 20px when the sidebar is full */
+.about { font: 11px/1.6 var(--mono); color: var(--muted); margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
+.about b { color: var(--text); font-weight: 600; }
+.about a { color: inherit; }
 main { overflow: auto; position: relative; }
 main.drop { background: var(--drop); }
 main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
@@ -208,7 +214,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 </template>
 
 <header>
-  <h1><a href="/"><img src="/arranger.png" alt="">arranger</a></h1>
+  <h1><a href="/arrange"><img src="/arranger.png" alt="">arranger</a></h1>
   <select id="project" aria-label="Project">
     {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
   </select>
@@ -239,6 +245,13 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
   <p class="hint">Drag a type onto the canvas to add an agent, or onto an agent to put it under that agent. Drag boxes to move them, or empty space to pan; drop one on another to change who it reports to. Double-click to rename.</p>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
+  <span class="grow"></span>
+  {{with .Version}}<p class="about" id="version" title="{{.String}}{{if .Commit}}&#10;commit {{.Commit}}{{end}}">
+    <b>arranger {{if .ReleaseURL}}<a href="{{.ReleaseURL}}" target="_blank" rel="noopener" title="Release notes">{{.Version}}</a>{{else}}{{.Version}}{{end}}</b>
+    {{if .Short}}<br>commit {{if .CommitURL}}<a href="{{.CommitURL}}" target="_blank" rel="noopener">{{.Short}}</a>{{else}}{{.Short}}{{end}}{{if .Dirty}}<span class="bad">+dirty</span>{{end}}{{end}}
+    {{if .When}}<br>{{.When}}{{end}}
+    <br>{{.Go}} · <a href="{{$.Repo}}/releases" target="_blank" rel="noopener">all releases</a>
+  </p>{{end}}
 </aside>
 
 <main><button id="tidy" title="Lay the boxes out as a tree again">Tidy up</button><div id="canvas"><svg id="links"></svg></div></main>

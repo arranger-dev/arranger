@@ -15,6 +15,7 @@ import (
 	"arranger/internal/git"
 	"arranger/internal/orch"
 	"arranger/internal/store"
+	"arranger/internal/version"
 )
 
 func TestValidate(t *testing.T) {
@@ -102,34 +103,43 @@ func TestGuard(t *testing.T) {
 
 func TestPages(t *testing.T) {
 	a := newApp(t)
-	landing := a.must(200, "GET", "/", "")
-	if !strings.Contains(landing, GitHubURL) || !strings.Contains(landing, "/arranger.png") {
-		t.Fatal("landing page should link GitHub and show the logo")
+	// the landing page lives in its own repo now; / goes straight to the app
+	r := httptest.NewRequest("GET", "http://localhost:7777/", nil)
+	w := httptest.NewRecorder()
+	a.h.ServeHTTP(w, r)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != "/arrange" {
+		t.Fatalf("/: %d → %q", w.Code, w.Header().Get("Location"))
 	}
 	page := a.must(200, "GET", "/arrange?p="+a.pid, "")
 	if !strings.Contains(page, `rel="icon"`) || !strings.Contains(page, "API Coder") {
 		t.Fatal("arrange page should carry the favicon and the demo agents")
 	}
-	r := httptest.NewRequest("GET", "http://localhost:7777/arranger.png", nil)
-	w := httptest.NewRecorder()
+	if v := version.Get(); !strings.Contains(page, `id="version"`) || !strings.Contains(page, v.Version) {
+		t.Fatalf("arrange page should show the version %q", v.Version)
+	}
+	r = httptest.NewRequest("GET", "http://localhost:7777/arranger.png", nil)
+	w = httptest.NewRecorder()
 	a.h.ServeHTTP(w, r)
 	if w.Code != 200 || w.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("logo: %d %s", w.Code, w.Header().Get("Content-Type"))
 	}
 	a.must(404, "GET", "/nope", "")
+	a.must(404, "GET", "/landing.html", "")
+
+	var v version.Info
+	if err := json.Unmarshal([]byte(a.must(200, "GET", "/api/version", "")), &v); err != nil || v.Version == "" || v.Go == "" {
+		t.Fatalf("version api: %+v %v", v, err)
+	}
 
 	css := a.must(200, "GET", "/fonts.css", "")
-	if !strings.Contains(css, "Plex Sans") || !strings.Contains(page, "/fonts.css") || !strings.Contains(landing, "/fonts.css") {
-		t.Fatal("both pages should load the embedded fonts")
+	if !strings.Contains(css, "Plex Sans") || !strings.Contains(page, "/fonts.css") {
+		t.Fatal("the page should load the embedded fonts")
 	}
 	r = httptest.NewRequest("GET", "http://localhost:7777/fonts/lilex-latin-400-normal.woff2", nil)
 	w = httptest.NewRecorder()
 	a.h.ServeHTTP(w, r)
 	if w.Code != 200 || w.Body.Len() < 1000 {
 		t.Fatalf("font file: %d, %d bytes", w.Code, w.Body.Len())
-	}
-	if strings.Contains(landing, `href="#why"`) || strings.Index(landing, `id="theme"`) > strings.Index(landing, `rel="noopener">GitHub</a>`) {
-		t.Fatal("landing navbar: no Why/How links, theme toggle before GitHub")
 	}
 }
 

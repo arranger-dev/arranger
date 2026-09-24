@@ -43,7 +43,7 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
    arranger
    ```
 
-   Then open <http://127.0.0.1:7777> and click **Open arranger**.
+   Then open <http://127.0.0.1:7777>.
 
 2. **Point it at a repo.** Click **Settings** in the header and enter the path to a git repository. Leave the base branch blank to use the current branch. The repo needs at least one commit.
 
@@ -69,6 +69,7 @@ arranger [flags]
   -parallel int     max agent processes running at once (default 4)
   -log string       log level: debug, info, warn or error (default "info")
   -log-json         log JSON lines instead of readable text
+  -version          print the version and exit
 ```
 
 The server logs runs, agent processes (exit code, time, tokens, cost) and every API change to stderr. Use `-log debug` to also see each check and every request.
@@ -83,13 +84,20 @@ The server logs runs, agent processes (exit code, time, tokens, cost) and every 
 ## Development
 
 ```sh
-go test ./...
-go run ./cmd/arranger -log debug
+make          # list the targets
+make dev      # run from source with debug logs, a throwaway data dir, on port 7778
+make check    # formatting, vet and tests
+make build    # ./arranger, stamped with version, commit and build date
+make dist     # release archives for macOS and Linux in dist/
 ```
+
+The canvas page shows the running version, commit and build date at the bottom of the left sidebar, and `arranger -version` prints them.
 
 The code is organized as `cmd/arranger` (entry point), `internal/server` (HTTP and SSE), `internal/orch` (running goals, managers, checks), `internal/agents` (agent CLI drivers), `internal/git` (worktrees, diffs, merges), `internal/store` (SQLite), and `web` (the embedded UI).
 
-Push a tag like `v0.3.0` to build release binaries for macOS and Linux and publish them on GitHub.
+Push a tag like `v0.3.0` to build release binaries for macOS and Linux (with `make dist`) and publish them on GitHub.
+
+The landing page lives in its own repository, `arranger-web`.
 
 ## License
 

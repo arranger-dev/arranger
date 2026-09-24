@@ -1,5 +1,5 @@
-// Package server is arranger's HTTP interface: the landing and arrange pages, the JSON API
-// the arrange page drives, and a Server-Sent Events stream of live updates.
+// Package server is arranger's HTTP interface: the arrange page, the JSON API it drives, and
+// a Server-Sent Events stream of live updates.
 package server
 
 import (
@@ -19,11 +19,9 @@ import (
 	"arranger/internal/agents"
 	"arranger/internal/orch"
 	"arranger/internal/store"
+	"arranger/internal/version"
 	"arranger/web"
 )
-
-// GitHubURL is linked from the landing page.
-const GitHubURL = "https://github.com/arranger-dev/arranger"
 
 type Server struct {
 	st    *store.Store
@@ -37,7 +35,7 @@ type Server struct {
 func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	s := &Server{st: st, o: o, pages: template.Must(template.ParseFS(web.FS, "*.html")), build: fmt.Sprint(time.Now().UnixNano())}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.landing)
+	mux.Handle("GET /{$}", http.RedirectHandler("/arrange", http.StatusFound))
 	mux.HandleFunc("GET /arrange", s.arrange)
 	mux.Handle("GET /app.js", http.FileServerFS(web.FS))
 	mux.Handle("GET /arranger.png", http.FileServerFS(web.FS))
@@ -66,6 +64,7 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("PUT /api/types/{id}", s.saveType)
 	mux.HandleFunc("DELETE /api/types/{id}", s.deleteType)
 	mux.HandleFunc("GET /api/events", s.sse)
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, version.Get()) })
 	return logRequests(guard(loopback, mux))
 }
 
@@ -87,12 +86,6 @@ func guard(loopback bool, h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
-}
-
-func (s *Server) landing(w http.ResponseWriter, r *http.Request) {
-	if err := s.pages.ExecuteTemplate(w, "landing.html", map[string]string{"GitHub": GitHubURL}); err != nil {
-		zap.L().Error("render page", zap.Error(err))
-	}
 }
 
 func (s *Server) arrange(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +121,7 @@ func (s *Server) arrange(w http.ResponseWriter, r *http.Request) {
 	}
 	err = s.pages.ExecuteTemplate(w, "arrange.html", map[string]any{
 		"Projects": ps, "Project": cur, "Agents": as, "Runtimes": names, "Installed": installed,
-		"Types": types, "Build": s.build, "GitHub": GitHubURL,
+		"Types": types, "Build": s.build, "Version": version.Get(), "Repo": version.Repo,
 	})
 	if err != nil {
 		zap.L().Error("render page", zap.Error(err))
