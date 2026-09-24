@@ -84,10 +84,9 @@ The server logs runs, agent processes (exit code, time, tokens, cost) and every 
 ## Development
 
 ```sh
-make          # list the targets
-make dev      # run from source with debug logs, a throwaway data dir, on port 7778
+make          # build ./arranger, stamped with version, commit and build date
+make dev      # run from source with debug logs and a throwaway data dir, on port 7778
 make check    # formatting, vet and tests
-make build    # ./arranger, stamped with version, commit and build date
 make dist     # release archives for macOS and Linux in dist/
 ```
 
