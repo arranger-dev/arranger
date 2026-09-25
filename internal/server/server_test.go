@@ -609,3 +609,80 @@ func TestMergePreviewOnlyReads(t *testing.T) {
 		t.Fatal("merging should include the uncommitted file")
 	}
 }
+
+// The queue API: add, edit, reorder, skip, remove and run goals one after another.
+func TestQueueAPI(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(400, "POST", "/api/agents/k/queue", `{"title":"no checks"}`)
+	a.must(400, "POST", "/api/agents/k/queue/start", "")
+	ids := []int64{}
+	for _, title := range []string{"one", "two", "three", "four"} {
+		var it store.QueueItem
+		json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/queue", `{"title":"`+title+`","checks":"true"}`)), &it)
+		ids = append(ids, it.ID)
+	}
+	id := func(i int) string { return strconv.FormatInt(ids[i], 10) }
+	a.must(204, "PUT", "/api/agents/k/queue/"+id(0), `{"title":"one, edited","checks":"true"}`)
+	a.must(204, "POST", "/api/agents/k/queue/order", `{"ids":[`+id(1)+`,`+id(0)+`,`+id(2)+`,`+id(3)+`]}`)
+	a.must(204, "POST", "/api/agents/k/queue/"+id(2)+"/skip", "")
+	a.must(204, "DELETE", "/api/agents/k/queue/"+id(3), "")
+	a.must(204, "PUT", "/api/agents/k/queue/settings", `{"onFail":"skip"}`)
+	a.must(400, "PUT", "/api/agents/k/queue/settings", `{"onFail":"explode"}`)
+	a.must(202, "POST", "/api/agents/k/queue/start", "")
+	var q store.Queue
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/queue", "")), &q)
+		if !q.Active && !a.o.IsRunning("k") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queue never finished")
+		}
+	}
+	order := []string{}
+	for _, it := range q.Items {
+		order = append(order, it.Title+":"+it.Status)
+	}
+	// finished goals come newest first; the skipped one stays in the history, the removed one is gone
+	if got := strings.Join(order, " "); !strings.Contains(got, "one, edited:done") || !strings.Contains(got, "two:done") ||
+		!strings.Contains(got, "three:skipped") || strings.Contains(got, "four") || q.OnFail != "skip" {
+		t.Fatalf("queue: %s (onFail %s)", got, q.OnFail)
+	}
+	if g, _ := a.st.Goal("k"); g.Title != "one, edited" {
+		t.Fatalf("the last goal it ran is its goal now: %q", g.Title)
+	}
+	a.must(409, "PUT", "/api/agents/k/queue/"+id(1), `{"title":"too late","checks":"true"}`)
+}
+
+// Run all runs each top-level agent's goals.
+func TestRunAllRunsGoals(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"},{"id":"idle","name":"Idle","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"one","checks":"true"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"two","checks":"true"}`)
+	var r struct{ Started int }
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects/"+p.ID+"/run", "")), &r)
+	if r.Started != 1 {
+		t.Fatalf("started %d, want only the agent with goals", r.Started)
+	}
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if q, _ := a.st.Queue("k"); !q.Active && !a.o.IsRunning("k") {
+			if q.Items[0].Status != "done" || q.Items[1].Status != "done" {
+				t.Fatalf("goals: %+v", q.Items)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("goals never finished")
+		}
+	}
+}

@@ -233,3 +233,28 @@ func TestCoderBecomesProgrammer(t *testing.T) {
 		}
 	}
 }
+
+// A top-level agent's single goal from before goal lists becomes the first goal in its list, once;
+// a report's goal stays its own.
+func TestGoalBecomesFirstInList(t *testing.T) {
+	s, path := open(t)
+	ps, _ := s.Projects()
+	as, _ := s.Agents(ps[0].ID)
+	lead, report := as[0], as[1]
+	s.SaveGoal(lead.ID, Goal{Title: "ship it", Checks: "true"})
+	s.SaveGoal(report.ID, Goal{Title: "its part", Checks: "true"})
+	s.SQL().Exec(`PRAGMA user_version = 1`) // as before goal lists
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	q, _ := s2.Queue(lead.ID)
+	if len(q.Items) != 1 || q.Items[0].Title != "ship it" || q.Items[0].Status != "queued" {
+		t.Fatalf("lead's goals: %+v", q.Items)
+	}
+	if q, _ := s2.Queue(report.ID); len(q.Items) != 0 {
+		t.Fatalf("a report's goal isn't a list: %+v", q.Items)
+	}
+}

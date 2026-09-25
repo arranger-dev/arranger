@@ -246,7 +246,7 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// runAll starts every top-level agent that has a goal; managers run their own subtrees.
+// runAll starts every top-level agent's goals; managers run their own subtrees.
 func (s *Server) runAll(w http.ResponseWriter, r *http.Request) {
 	as, err := s.st.Agents(r.PathValue("id"))
 	if err != nil {
@@ -255,10 +255,10 @@ func (s *Server) runAll(w http.ResponseWriter, r *http.Request) {
 	}
 	started, errs := 0, []string{}
 	for _, a := range as {
-		if g, _ := s.st.Goal(a.ID); a.Parent != "" || g.Title == "" {
-			continue
+		if _, err := s.st.NextQueueItem(a.ID); a.Parent != "" || err != nil {
+			continue // a report, or no goals to run
 		}
-		if err := s.o.Start(a.ID); err != nil {
+		if err := s.o.StartQueue(a.ID); err != nil {
 			errs = append(errs, err.Error())
 		} else {
 			started++

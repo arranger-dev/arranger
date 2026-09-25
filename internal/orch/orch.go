@@ -212,7 +212,7 @@ func checkGoal(a store.Agent, g store.Goal) error {
 }
 
 // Start validates a run and starts it in the background. A manager runs its whole subtree.
-func (o *Orchestrator) Start(agentID string) error { return o.start(agentID, "") }
+func (o *Orchestrator) Start(agentID string) error { _, err := o.start(agentID, ""); return err }
 
 // Revise re-runs an agent that already worked, to make the change the user describes. A worker
 // keeps its work and makes the change; a manager passes each part of it to the reports it
@@ -221,34 +221,36 @@ func (o *Orchestrator) Revise(agentID, change string) error {
 	if change = strings.TrimSpace(change); change == "" {
 		return errors.New("describe what should change")
 	}
-	return o.start(agentID, change)
+	_, err := o.start(agentID, change)
+	return err
 }
 
-func (o *Orchestrator) start(agentID, change string) error {
+// start returns the new run's log session.
+func (o *Orchestrator) start(agentID, change string) (int64, error) {
 	a, pid, err := o.Store.Agent(agentID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("agent %s not found; save the arrangement first", agentID)
+		return 0, fmt.Errorf("agent %s not found; save the arrangement first", agentID)
 	} else if err != nil {
-		return fmt.Errorf("agent %s: %w", agentID, err)
+		return 0, fmt.Errorf("agent %s: %w", agentID, err)
 	}
 	p, err := o.Store.Project(pid)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if p.Repo == "" {
-		return errors.New("set a git repository for this project first")
+		return 0, errors.New("set a git repository for this project first")
 	}
 	g, err := o.Store.Goal(agentID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if err := checkGoal(a, g); err != nil {
-		return err
+		return 0, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	if !o.register(agentID, cancel) {
 		cancel()
-		return fmt.Errorf("%s is already running", a.Name)
+		return 0, fmt.Errorf("%s is already running", a.Name)
 	}
 	j := &job{o: o, ctx: ctx, p: p, a: a, change: change, session: time.Now().UnixMilli()}
 	if change != "" {
@@ -256,11 +258,12 @@ func (o *Orchestrator) start(agentID, change string) error {
 	}
 	j.status("starting", nil) // before returning, so the page shows it working right away
 	go func() {
-		defer o.unregister(agentID)
-		defer cancel()
-		o.execute(j, "")
+		status := o.execute(j, "")
+		cancel()
+		o.unregister(agentID)
+		o.afterRun(agentID, status, j.session) // its queue, if it has one running, goes on
 	}()
-	return nil
+	return j.session, nil
 }
 
 // job is one agent's run: where it works and how it reports.

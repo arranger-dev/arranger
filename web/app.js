@@ -451,11 +451,11 @@ $("#theme").onclick = () => {
 };
 
 $("#run-all").onclick = async () => {
-  const tops = [...agents.values()].filter(a => !parentOf(a.id) && summary.agents[a.id]?.title);
-  if (!tops.length) { say("No top-level agent has a goal yet. Select one and set its goal first.", true); return; }
+  const tops = [...agents.values()].filter(a => !parentOf(a.id) && summary.agents[a.id]?.queueWaiting);
+  if (!tops.length) { say("No top-level agent has goals to run. Select one and add a goal first.", true); return; }
   const names = tops.map(a => a.name).join(", ");
   if (!await ask(`Run all ${tops.length} top-level ${tops.length === 1 ? "agent" : "agents"}?`,
-    `Starts ${names} from ${tops.length === 1 ? "its goal" : "their goals"}. Managers plan for their teams, so every agent below them may run too.` +
+    `${tops.map(a => `${a.name}: ${plural(summary.agents[a.id].queueWaiting, "goal")}`).join(", ")}. Managers plan for their teams, so every agent below them may run too.` +
     (dirty ? " Unsaved changes on the canvas are saved first." : ""), "Run all", "Cancel", false)) return;
   try {
     if (dirty) await save();
@@ -593,6 +593,11 @@ async function select(id) {
   if (id !== revisingFor) { $("#r-change").value = ""; status($("#r-msg"), ""); } // a draft belongs to its agent
   showGoalState(g);
   renderPlan();
+  $("#q-form").hidden = true;
+  $("#q-actions").hidden = false;
+  status($("#q-msg"), "");
+  $("#g-single").hidden = !parentOf(id); // a report's goal comes from its manager; top-level agents have a list
+  loadQueue();
   renderStats();
   showTab(tab);
 }
@@ -619,12 +624,7 @@ $("#a-parent").onchange = e => {
 
 function showGoalState(g) {
   const mgr = parentOf(selected), team = kidsOf(selected);
-  // once an agent has run (and isn't running), changes go through Request changes, not goal edits
-  $("#revise").hidden = !g.title || g.status === "idle" || g.status === "awaiting" || BUSY.includes(g.status);
-  $("#r-hint").textContent = team.length
-    ? `${nameOf(selected)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(selected)} reviews and merges the changes and runs its checks again.`
-    : `${nameOf(selected)} keeps its work and changes only this, then its checks run again.`;
-  $("#i-run").title = team.length ? "Plan again from the goal and run the whole team" : "Run from the goal";
+  $("#i-run").title = !mgr ? "Run the goals in its list" : "Run from its goal";
   $("#g-hint").textContent = kidsOf(selected).length
     ? "Manager: Run plans subgoals for its team, runs them in parallel, reviews and merges their work, then runs these checks on the result."
     : mgr ? `${nameOf(mgr)} sets this goal when it plans; editing it here is fine, but the next plan replaces it.` : "";
@@ -722,6 +722,7 @@ aform.onsubmit = async e => {
 const runMsg = (t, bad) => { status($("#i-msg"), t, bad); if (t) say(t, bad); };
 
 $("#i-run").onclick = async e => {
+  if (!parentOf(selected)) return openRunDialog();
   const btn = e.currentTarget, id = selected, f = gform.elements;
   const isManager = kidsOf(id).length > 0;
   // catch what the server would refuse, and point at the field to fix
@@ -748,7 +749,32 @@ $("#i-run").onclick = async e => {
   btn.disabled = false;
 };
 // Request changes: re-run an agent that already worked with what the user wants different.
+// Request changes: after a run, send the agent back to change what isn't right, keeping its work.
+// It's offered where results are read: on the latest finished goal, and after the latest run's log.
 let revisingFor = null;
+// canRevise says whether the agent has a result to change: it ran, and isn't working now.
+function canRevise(id) {
+  const st = summary.agents[id];
+  return !!st?.title && !["idle", "awaiting"].includes(st.status) && !BUSY.includes(st.status);
+}
+function openRevise() {
+  const id = selected, team = kidsOf(id);
+  $("#revise-dialog h3").textContent = `Request changes from ${nameOf(id)}`;
+  $("#r-hint").textContent = team.length
+    ? `${nameOf(id)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(id)} reviews and merges the changes and runs its checks again.`
+    : `${nameOf(id)} keeps its work and changes only this, then its checks run again.`;
+  status($("#r-msg"), "");
+  $("#revise-dialog").showModal();
+  $("#r-change").focus();
+}
+// a revise button, for the Goals list and the Logs tab
+function reviseButton(cls = "link") {
+  const b = el("button", cls, "Request changes");
+  b.type = "button";
+  b.title = "Not quite right? Say what should change; the agent keeps its work and changes only that";
+  b.onclick = openRevise;
+  return b;
+}
 $("#r-change").oninput = () => { revisingFor = selected; };
 $("#r-change").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#r-go").click(); } };
 $("#r-go").onclick = async e => {
@@ -762,6 +788,7 @@ $("#r-go").onclick = async e => {
     $("#r-change").value = "";
     revisingFor = null;
     status($("#r-msg"), "");
+    $("#revise-dialog").close();
     setStatus(id, "starting");
     runMsg(kidsOf(id).length ? `${nameOf(id)} is passing your changes to its team.` : `${nameOf(id)} is making your changes.`);
     refreshSummary();
@@ -940,6 +967,213 @@ $("#pr-cancel").onclick = async e => {
   if (!await ask(`Cancel ${nameOf(planEdit.mgr)}'s plan?`, "The run stops and no report's goal changes.", "Cancel plan", "Keep it")) return;
   decidePlan(btn, { action: "cancel" }, "Cancelling…", `${nameOf(planEdit.mgr)}'s plan was cancelled.`);
 };
+
+/* ---------- queue: goals a top-level agent runs one after another ---------- */
+
+let queue = null, editingItem = null, latestFinished = null;
+const qURL = (path = "") => `/api/agents/${encodeURIComponent(selected)}/queue${path}`;
+const plainCount = (s, one) => { const n = lines(s).length; return `${n} ${one}${n === 1 ? "" : "s"}`; };
+const lines = s => (s || "").split("\n").map(l => l.trim()).filter(Boolean);
+
+// refreshGoalFields shows the agent's current goal in the form after its queue moved on,
+// unless the user is typing in it.
+async function refreshGoalFields() {
+  if (gform.contains(document.activeElement) && !$("#queue").contains(document.activeElement)) return;
+  const id = selected, g = (await api("GET", `/api/agents/${encodeURIComponent(id)}`).catch(() => null))?.goal;
+  if (!g || id !== selected) return;
+  for (const k of ["title", "body", "criteria", "checks"]) gform.elements[k].value = g[k];
+}
+
+async function loadQueue() {
+  const box = $("#queue"), id = selected;
+  box.hidden = !id || !!parentOf(id); // reports get their goals from their manager
+  if (box.hidden) return;
+  try { queue = await api("GET", qURL()); } catch { box.hidden = true; return; }
+  if (id === selected) renderQueue();
+}
+
+function renderQueue() {
+  const waiting = queue.items.filter(i => i.status === "queued" || i.status === "running");
+  const finished = queue.items.filter(i => i.status !== "queued" && i.status !== "running");
+  const running = waiting.find(i => i.status === "running");
+  const st = summary.agents[selected];
+  const left = waiting.filter(i => i.status === "queued").length;
+  $("#q-state").textContent = running ? `working on goal ${finished.filter(i => i.status !== "skipped").length + 1} of ${queue.items.filter(i => i.status !== "skipped").length}`
+    : st?.queuePaused ? `stopped at "${st.queuePaused}": it failed. Run goes on with the rest.`
+    : left ? `${left} to run` : "";
+  $("#q-hint").hidden = waiting.length > 0;
+  $("#q-items").replaceChildren(...(waiting.length ? waiting.map(queueRow) : [el("li", "empty hint", "No goals yet. Add one, then press Run.")]));
+  const done = $("#q-done");
+  if (finished.length) done.dataset.n = finished.length; else delete done.dataset.n;
+  $("summary", done).textContent = `Finished (${finished.length})`;
+  latestFinished = finished.find(i => i.status !== "skipped");
+  if (latestFinished && canRevise(selected)) done.open = true; // its Request changes button should be in sight
+  $("ol", done).replaceChildren(...finished.map(doneRow));
+}
+
+const GRIP = "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01";
+function queueRow(it) {
+  const li = el("li", "qi");
+  li.dataset.id = it.id;
+  li.dataset.status = it.status;
+  const running = it.status === "running";
+  if (!running) {
+    const g = document.createElementNS(SVG, "svg"), p = document.createElementNS(SVG, "path");
+    g.setAttribute("viewBox", "0 0 24 24"); g.setAttribute("class", "grip li"); p.setAttribute("d", GRIP); g.append(p);
+    li.append(g);
+    li.draggable = true;
+  }
+  const t = el("span", "qt", it.title);
+  t.title = it.title;
+  li.append(t, el("span", "qm", running ? "running" : plainCount(it.checks, "check")));
+  if (!running) li.append(itemMenu(it));
+  return li;
+}
+
+function itemMenu(it) {
+  const d = el("details", "menu"), ul = el("ul");
+  d.append(el("summary", "", "···"), ul);
+  d.querySelector("summary").title = "More";
+  const act = (label, fn, cls = "") => { const b = el("button", cls, label); b.type = "button"; b.onclick = e => { e.preventDefault(); d.open = false; fn(); }; const li = el("li"); li.append(b); ul.append(li); };
+  act("Edit", () => openItemForm(it));
+  act("Run next", () => moveToFront(it.id));
+  act("Skip", () => queueCall("POST", `/${it.id}/skip`, null, "Skipped."));
+  act("Remove", async () => { if (await ask(`Remove "${it.title}" from the queue?`, "", "Remove")) queueCall("DELETE", `/${it.id}`, null, "Removed."); }, "danger");
+  return d;
+}
+
+function doneRow(it) {
+  const li = el("li", "qi");
+  li.dataset.status = it.status;
+  const t = el("span", "qt", it.title);
+  t.title = it.title;
+  const word = { done: "done", failed: "failed", blocked: "needs you", stopped: "stopped", skipped: "skipped" }[it.status] || it.status;
+  li.append(el("span", "dot"), t, el("span", "qm", word + (it.finished ? " · " + clock(it.finished) : "")));
+  const acts = el("span", "qa"); // on a line of their own, so a narrow panel never pushes them out of view
+  if (it.session) {
+    const b = el("button", "link", "View log");
+    b.type = "button";
+    b.onclick = () => { logState.focus = it.session; showTab("logs"); };
+    acts.append(b);
+  }
+  if (it === latestFinished && canRevise(selected)) acts.append(reviseButton());
+  li.append(acts);
+  const again = el("button", "link", "Add again");
+  again.type = "button";
+  again.title = "Put a copy of this goal back in the list, to run it again";
+  again.onclick = () => queueCall("POST", "", { title: it.title, body: it.body, criteria: it.criteria, checks: it.checks }, "Added again. Press Run to run it.");
+  acts.append(again);
+  return li;
+}
+
+async function queueCall(method, path, body, done) {
+  try {
+    await api(method, qURL(path), body);
+    status($("#q-msg"), done || "");
+    await loadQueue();
+    refreshSummary();
+  } catch (err) { status($("#q-msg"), err.message, true); }
+}
+
+function moveToFront(id) {
+  const ids = queue.items.filter(i => i.status === "queued").map(i => i.id);
+  queueCall("POST", "/order", { ids: [id, ...ids.filter(x => x !== id)] }, "It runs next.");
+}
+
+// add or edit a goal in the queue, in the form under the list
+function openItemForm(it) {
+  editingItem = it;
+  $("#q-form").hidden = false;
+  $("#qf-title").value = it?.title ?? "";
+  $("#qf-body").value = it?.body ?? "";
+  $("#qf-criteria").value = it?.criteria ?? "";
+  $("#qf-checks").value = it?.checks ?? gform.elements.checks.value; // the agent's own checks are a good start
+  $("#qf-save").textContent = it ? "Save goal" : "Add goal";
+  $("#q-actions").hidden = true;
+  $("#qf-title").focus();
+}
+$("#q-add").onclick = () => openItemForm(null);
+$("#qf-cancel").onclick = () => { $("#q-form").hidden = true; $("#q-actions").hidden = false; editingItem = null; };
+$("#qf-save").onclick = async () => {
+  const body = { title: $("#qf-title").value, body: $("#qf-body").value, criteria: $("#qf-criteria").value, checks: $("#qf-checks").value };
+  try {
+    if (editingItem) await api("PUT", qURL(`/${editingItem.id}`), body);
+    else await api("POST", qURL(), body);
+    $("#q-form").hidden = true;
+    $("#q-actions").hidden = false;
+    status($("#q-msg"), editingItem ? "Saved." : "Added. Press Run when your goals are ready.");
+    editingItem = null;
+    await loadQueue();
+    refreshSummary();
+  } catch (err) { status($("#q-msg"), err.message, true); }
+};
+// Enter in the queue's fields must not submit the goal form around them
+$("#queue").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches("input")) { e.preventDefault(); if (e.target.id === "qf-title") $("#qf-save").click(); } });
+
+// Run on a top-level agent shows the goals it's about to work through, then starts them.
+async function openRunDialog() {
+  const id = selected;
+  try { queue = await api("GET", qURL()); } catch (err) { runMsg(err.message, true); return; }
+  const todo = queue.items.filter(i => i.status === "queued");
+  if (!todo.length) {
+    showTab("goal");
+    runMsg(`${nameOf(id)} has no goals to run. Add one first.`, true);
+    openItemForm(null);
+    return;
+  }
+  $("#run-dialog h3").textContent = `Run ${todo.length === 1 ? "this goal" : `these ${todo.length} goals`}?`;
+  $("#run-goals").replaceChildren(...todo.map(it => {
+    const li = el("li"), cs = lines(it.checks);
+    li.append(el("b", "", it.title));
+    const checks = el("span", "rg");
+    checks.append(`${cs.length === 1 ? "Check" : `${cs.length} checks`}: `, ...cs.slice(0, 3).flatMap((c, i) => [i ? ", " : "", el("code", "", c)]), cs.length > 3 ? ` and ${cs.length - 3} more` : "");
+    li.append(checks);
+    const body = (it.body || "").trim().split("\n")[0];
+    if (body) li.append(el("span", "rg", body.length > 140 ? body.slice(0, 140) + "…" : body));
+    return li;
+  }));
+  $$('#run-form input[name="run-onfail"]').forEach(r => r.checked = r.value === queue.onFail);
+  $("#run-go").textContent = todo.length === 1 ? "Run" : `Run ${todo.length} goals`;
+  $("#run-dialog").showModal();
+}
+$("#run-form").onsubmit = async e => {
+  if (e.submitter?.value !== "run") return;
+  e.preventDefault();
+  const id = selected, onFail = $('#run-form input[name="run-onfail"]:checked')?.value || "pause";
+  $("#run-go").disabled = true;
+  try {
+    if (dirty) await save();
+    if (onFail !== queue.onFail) await api("PUT", qURL("/settings"), { onFail });
+    await api("POST", qURL("/start"));
+    $("#run-dialog").close();
+    setStatus(id, "starting");
+    runMsg(`${nameOf(id)} is working on its goals.`);
+    loadQueue();
+    refreshSummary();
+    showTab("logs");
+  } catch (err) { runMsg(err.message, true); $("#run-dialog").close(); }
+  $("#run-go").disabled = false;
+};
+
+// drag a waiting goal to reorder
+let qDragged = null;
+$("#q-items").addEventListener("dragstart", e => { qDragged = e.target.closest(".qi"); qDragged?.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.stopPropagation(); });
+$("#q-items").addEventListener("dragover", e => {
+  if (!qDragged) return;
+  e.preventDefault();
+  const over = e.target.closest(".qi");
+  if (!over || over === qDragged || over.dataset.status === "running") return;
+  const r = over.getBoundingClientRect();
+  over.parentNode.insertBefore(qDragged, e.clientY < r.top + r.height / 2 ? over : over.nextSibling);
+});
+$("#q-items").addEventListener("dragend", e => {
+  e.stopPropagation();
+  if (!qDragged) return;
+  qDragged.classList.remove("dragging");
+  qDragged = null;
+  const ids = $$("#q-items .qi").filter(li => li.dataset.status === "queued").map(li => +li.dataset.id);
+  queueCall("POST", "/order", { ids });
+});
 
 /* ---------- logs: one section per run, outcome and reason first ---------- */
 
@@ -1228,8 +1462,13 @@ function section(g, latest, all, first) {
   const meta = [fmtDur((o.state === "running" || o.state === "awaiting" ? Date.now() : g.last) - g.first)];
   if (attempts > 1) meta.push(plural(attempts, "attempt"));
   if (tokens) meta.push(fmtTok(tokens) + " tokens");
-  const label = o.state === "other" ? (g.events.some(e => e.kind === "merge") ? "Merge at " : "Sync at ") : "Run at ";
-  sum.append(el("span", "lstate", o.word), el("span", "lwhen", label + clock(g.first)), el("span", "lmeta", meta.join(" · ")));
+  const goal = g.events.find(e => e.kind === "start")?.text;
+  const label = o.state === "other" ? (g.events.some(e => e.kind === "merge") ? "Merge at " : "Sync at ") + clock(g.first) : goal || "Run at " + clock(g.first);
+  if (goal) meta.unshift(clock(g.first));
+  const when = el("span", "lwhen", label);
+  when.title = goal || "";
+  sum.append(el("span", "lstate", o.word), when, el("span", "lmeta", meta.join(" · ")));
+  if (logState.focus && g.key === logState.focus) { d.open = true; logState.focusEl = d; }
   const body = el("div", "lbody");
   const filtered = logState.filter !== "all" || logState.q;
   if (!filtered) {
@@ -1247,6 +1486,11 @@ function section(g, latest, all, first) {
     if (act) body.append(el("p", "lact", act));
     const cl = checklist(g);
     if (cl) body.append(cl);
+    if (latest && ["done", "failed", "blocked"].includes(o.state) && canRevise(logState.agent)) {
+      const p = el("p", "lnext");
+      p.append("Not quite right? ", reviseButton("primary"));
+      body.append(p);
+    }
   }
   const rows = timeline(g, all, o.by);
   if (rows.length) { const ol = el("ol", "ltime"); ol.append(...rows); body.append(ol); }
@@ -1302,6 +1546,7 @@ function renderLogs() {
   if (!secs.length) log.replaceChildren(el("div", "empty", logState.events.length ? "Nothing matches." : "No activity yet. Set a goal and press Run."));
   else log.replaceChildren(...secs.map(s => s.d));
   logPane.scrollTop = top;
+  if (logState.focusEl) { logState.focusEl.scrollIntoView({ block: "start" }); logState.focusEl = logState.focus = null; }
   renderLogNow();
 }
 
@@ -1541,6 +1786,11 @@ function refreshCards() {
       b.append(t);
     }
     if (st.total) b.append(el("span", st.passed === st.total ? "ok" : "bad", `✓ ${st.passed}/${st.total}`));
+    if (st.queueTotal) {
+      const q = el("span", "q", `goals ${st.queueDone}/${st.queueTotal}`);
+      q.title = st.queueActive ? "Working through its goals" : st.queuePaused ? `Stopped at "${st.queuePaused}": it failed` : `${plural(st.queueWaiting, "goal")} to run`;
+      b.append(q);
+    }
     if (st.adds || st.dels) b.append(el("span", "", `+${st.adds} −${st.dels}`));
     if (st.attempts > 1) b.append(el("span", "", `try ${st.attempts}/3`));
     if (st.tokens) {
@@ -1558,7 +1808,7 @@ async function refreshSummary() {
   refreshCards();
   renderStats();
   const all = Object.entries(summary.agents);
-  const needs = all.filter(([, s]) => NEEDS.includes(s.status) || s.status === "awaiting");
+  const needs = all.filter(([, s]) => NEEDS.includes(s.status) || s.status === "awaiting" || s.queuePaused);
   syncPlans();
   const running = all.filter(([, s]) => BUSY.includes(s.status)).length;
   $("#n-running").textContent = running;
@@ -1569,10 +1819,13 @@ async function refreshSummary() {
   $("#needs").dataset.kind = needs.every(([, s]) => s.status === "awaiting") ? "plan" : "fail"; // amber for plans, red for failures
   if (!needs.length) $("#needs").open = false;
   $("#needs ul").replaceChildren(...needs.map(([id, s]) => {
-    const li = el("li", "", s.status === "awaiting" ? `⏸ ${nameOf(id)}: plan waiting for your approval` : `✗ ${nameOf(id)}: ${s.status} · ${s.title}`);
+    const li = el("li", "", s.status === "awaiting" ? `${nameOf(id)}: plan waiting for your approval`
+      : s.queuePaused ? `${nameOf(id)} stopped at "${s.queuePaused}": it failed`
+      : `${nameOf(id)}: ${s.status} · ${s.title}`);
     li.onclick = () => { $("#needs").open = false; if (s.status === "awaiting") tab = "goal"; select(id); };
     return li;
   }));
+  if (selected && queue && !$("#queue").hidden) renderQueue(); // whether it can take changes depends on its status
   if (selected && summary.agents[selected]) {
     const g = (await api("GET", `/api/agents/${selected}`).catch(() => null))?.goal;
     if (g) showGoalState(g);
@@ -1629,6 +1882,9 @@ es.onmessage = m => {
     if (e.agent === selected && e.kind !== "stderr") scheduleLiveDiff(); // it edited files, ran a tool, checkpointed...
   } else if (msg.type === "plan") {
     loadPlan(msg.agent);
+  } else if (msg.type === "queue") {
+    scheduleSummary();
+    if (msg.agent === selected) { loadQueue(); refreshGoalFields(); }
   } else if (msg.type === "status" || msg.type === "usage") {
     if (msg.type === "status") setStatus(msg.agent, msg.status);
     if (msg.type === "status" && msg.agent === selected && tab === "logs") loadLogs(); // its outcome and totals changed

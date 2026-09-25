@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS agent_types (
   model TEXT NOT NULL DEFAULT '', args TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS queue (
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, pos INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+  criteria TEXT NOT NULL DEFAULT '', checks TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued',
+  session INTEGER NOT NULL DEFAULT 0, finished INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS queue_agent ON queue(agent_id, status, pos);
 CREATE TABLE IF NOT EXISTS plans (
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', feedback TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0);
@@ -59,7 +64,12 @@ var migrations = []string{
 	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing', 'awaiting', 'fixing')`,
 	`ALTER TABLE agents ADD COLUMN approve_plan INTEGER NOT NULL DEFAULT 0`, // a manager waits for the user to approve its plan (opt-in)
 	// nobody is waiting on a draft plan after a restart
-	`UPDATE agents SET role = 'programmer' WHERE role = 'coder'`, // the Coder type is now called Programmer
+	`UPDATE agents SET role = 'programmer' WHERE role = 'coder'`,                // the Coder type is now called Programmer
+	`ALTER TABLE agents ADD COLUMN queue_active INTEGER NOT NULL DEFAULT 0`,     // runs its queued goals one after another
+	`ALTER TABLE agents ADD COLUMN queue_on_fail TEXT NOT NULL DEFAULT 'pause'`, // pause | skip
+	// a restart ends the run a queue was on; the queue waits for the user to start it again
+	`UPDATE queue SET status = 'stopped' WHERE status = 'running'`,
+	`UPDATE agents SET queue_active = 0`,
 	`UPDATE plans SET status = 'expired', decided = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE status = 'pending'`,
 }
 
@@ -165,6 +175,17 @@ func Open(path string) (*Store, error) {
 			db.Exec(`UPDATE agents SET prompt = ? WHERE role = ? AND trim(prompt) = ''`, prompt, role)
 		}
 		db.Exec(`PRAGMA user_version = 1`)
+		v = 1
+	}
+	// once: a top-level agent's single goal becomes the first in its list of goals
+	if v < 2 {
+		db.Exec(`INSERT INTO queue(agent_id, pos, title, body, criteria, checks, status, finished)
+			SELECT a.id, 1, g.title, g.body, g.criteria, g.checks,
+				CASE WHEN g.status = 'done' THEN 'done' WHEN g.status IN ('failed', 'blocked', 'stopped') THEN g.status ELSE 'queued' END,
+				CASE WHEN g.status IN ('done', 'failed', 'blocked', 'stopped') THEN CAST(strftime('%s','now') AS INTEGER) * 1000 ELSE 0 END
+			FROM agents a JOIN goals g ON g.agent_id = a.id
+			WHERE a.parent = '' AND trim(g.title) != '' AND trim(g.checks) != '' AND NOT EXISTS (SELECT 1 FROM queue q WHERE q.agent_id = a.id)`)
+		db.Exec(`PRAGMA user_version = 2`)
 	}
 	s := &Store{db: db}
 	var n int
@@ -324,7 +345,7 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 		if _, err := tx.Exec(`DELETE FROM agents WHERE id=?`, id); err != nil {
 			return err
 		}
-		for _, table := range []string{"goals", "runs", "events", "decisions", "plans"} {
+		for _, table := range []string{"goals", "runs", "events", "decisions", "plans", "queue"} {
 			if _, err := tx.Exec(`DELETE FROM `+table+` WHERE agent_id=?`, id); err != nil {
 				return err
 			}
@@ -515,6 +536,12 @@ type AgentStatus struct {
 	AllTokens int     `json:"allTokens"` // every run ever
 	Soft      int     `json:"tokenSoft"`
 	Hard      int     `json:"tokenHard"`
+	// its queue, for the badge on its box
+	QueueDone    int    `json:"queueDone"`    // goals it finished (done, failed, blocked, stopped)
+	QueueTotal   int    `json:"queueTotal"`   // every goal in it but skipped ones
+	QueueActive  bool   `json:"queueActive"`  // it's running through them
+	QueueWaiting int    `json:"queueWaiting"` // goals not run yet
+	QueuePaused  string `json:"queuePaused"`  // the goal whose failure paused it, when goals are still waiting
 }
 
 func (s *Store) Summary(projectID string) (Summary, error) {
@@ -524,7 +551,15 @@ func (s *Store) Summary(projectID string) (Summary, error) {
 		(SELECT coalesce(sum(cost),0) FROM runs r WHERE r.agent_id=a.id AND r.started >= coalesce(g.since,0)),
 		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id AND r.started >= coalesce(g.since,0)),
 		(SELECT coalesce(sum(cost),0) FROM runs r WHERE r.agent_id=a.id),
-		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id)
+		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id),
+		(SELECT count(*) FROM queue q WHERE q.agent_id=a.id AND q.status IN ('done', 'failed', 'blocked', 'stopped')),
+		(SELECT count(*) FROM queue q WHERE q.agent_id=a.id AND q.status != 'skipped'),
+		a.queue_active,
+		(SELECT count(*) FROM queue q WHERE q.agent_id=a.id AND q.status='queued'),
+		CASE WHEN a.queue_active = 0 AND EXISTS (SELECT 1 FROM queue q WHERE q.agent_id=a.id AND q.status='queued')
+			THEN coalesce((SELECT CASE WHEN q.status IN ('failed', 'blocked') THEN q.title ELSE '' END FROM queue q
+				WHERE q.agent_id=a.id AND q.status IN ('done', 'failed', 'blocked', 'stopped') ORDER BY q.finished DESC LIMIT 1), '')
+			ELSE '' END
 		FROM agents a LEFT JOIN goals g ON g.agent_id = a.id WHERE a.project_id=?`, projectID)
 	if err != nil {
 		return sum, err
@@ -534,7 +569,8 @@ func (s *Store) Summary(projectID string) (Summary, error) {
 		var id string
 		var st AgentStatus
 		if err := rows.Scan(&id, &st.Title, &st.Status, &st.Attempts, &st.Passed, &st.Total, &st.Adds, &st.Dels, &st.Since,
-			&st.Soft, &st.Hard, &st.Cost, &st.Tokens, &st.AllCost, &st.AllTokens); err != nil {
+			&st.Soft, &st.Hard, &st.Cost, &st.Tokens, &st.AllCost, &st.AllTokens,
+			&st.QueueDone, &st.QueueTotal, &st.QueueActive, &st.QueueWaiting, &st.QueuePaused); err != nil {
 			return sum, err
 		}
 		sum.Agents[id] = st
