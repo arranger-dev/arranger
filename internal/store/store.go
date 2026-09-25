@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS agent_types (
   model TEXT NOT NULL DEFAULT '', args TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS plans (
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', feedback TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0);
 `
 
 // migrations add columns to tables created by older versions; "duplicate column" errors are expected.
@@ -51,7 +54,10 @@ var migrations = []string{
 	`ALTER TABLE agents ADD COLUMN x REAL`,                                // canvas position; NULL = lay out automatically
 	`ALTER TABLE agents ADD COLUMN y REAL`,
 	// a crash mid-run leaves stale statuses behind
-	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing')`,
+	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing', 'awaiting')`,
+	`ALTER TABLE agents ADD COLUMN approve_plan INTEGER NOT NULL DEFAULT 0`, // a manager waits for the user to approve its plan (opt-in)
+	// nobody is waiting on a draft plan after a restart
+	`UPDATE plans SET status = 'expired', decided = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE status = 'pending'`,
 }
 
 type Project struct {
@@ -75,6 +81,8 @@ type Agent struct {
 	Color   string   `json:"color"`
 	X       *float64 `json:"x"` // nil until the user places the box
 	Y       *float64 `json:"y"`
+
+	ApprovePlan bool `json:"approvePlan"` // as a manager, wait for the user to approve each plan
 }
 
 // AgentType is a user-defined palette entry: a role with default settings for new agents.
@@ -207,11 +215,11 @@ func (s *Store) Projects() ([]Project, error) {
 	return ps, rows.Err()
 }
 
-const agentCols = `id, name, role, parent, runtime, model, prompt, args, token_soft, token_hard, color, x, y`
+const agentCols = `id, name, role, parent, runtime, model, prompt, args, token_soft, token_hard, color, x, y, approve_plan`
 
 func scanAgent(sc interface{ Scan(...any) error }, extra ...any) (a Agent, err error) {
 	var x, y sql.NullFloat64
-	err = sc.Scan(append([]any{&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &a.Soft, &a.Hard, &a.Color, &x, &y}, extra...)...)
+	err = sc.Scan(append([]any{&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &a.Soft, &a.Hard, &a.Color, &x, &y, &a.ApprovePlan}, extra...)...)
 	if x.Valid && y.Valid {
 		a.X, a.Y = &x.Float64, &y.Float64
 	}
@@ -252,8 +260,8 @@ func (s *Store) Agent(id string) (a Agent, projectID string, err error) {
 
 // UpdateAgent saves an agent's settings (not its place in the tree).
 func (s *Store) UpdateAgent(a Agent) error {
-	_, err := s.db.Exec(`UPDATE agents SET name=?, runtime=?, model=?, prompt=?, args=?, token_soft=?, token_hard=?, color=? WHERE id=?`,
-		a.Name, a.Runtime, a.Model, a.Prompt, a.Args, a.Soft, a.Hard, a.Color, a.ID)
+	_, err := s.db.Exec(`UPDATE agents SET name=?, runtime=?, model=?, prompt=?, args=?, token_soft=?, token_hard=?, color=?, approve_plan=? WHERE id=?`,
+		a.Name, a.Runtime, a.Model, a.Prompt, a.Args, a.Soft, a.Hard, a.Color, a.ApprovePlan, a.ID)
 	return err
 }
 
@@ -277,9 +285,9 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 			rt = "claude"
 		}
 		// settings only apply to new agents (e.g. from a custom type); existing ones keep theirs
-		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt, color, token_soft, token_hard, x, y) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt, color, token_soft, token_hard, x, y, approve_plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, parent=excluded.parent, pos=excluded.pos, x=excluded.x, y=excluded.y`,
-			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt, a.Color, a.Soft, a.Hard, a.X, a.Y); err != nil {
+			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt, a.Color, a.Soft, a.Hard, a.X, a.Y, a.ApprovePlan); err != nil {
 			return err
 		}
 		keep[a.ID] = true
@@ -371,6 +379,57 @@ func (s *Store) AddDecision(agentID, kind string, v any) {
 	if _, err := s.db.Exec(`INSERT INTO decisions(agent_id, ts, kind, json) VALUES(?,?,?,?)`, agentID, time.Now().UnixMilli(), kind, string(b)); err != nil {
 		log.Printf("AddDecision: %v", err)
 	}
+}
+
+// Plan is a manager's plan (kind "plan": subgoals) or routing of a requested change (kind
+// "revision": changes), kept as a draft while the user decides on it.
+type Plan struct {
+	ID       int64           `json:"id"`
+	Agent    string          `json:"agent"`
+	Kind     string          `json:"kind"`
+	JSON     json.RawMessage `json:"plan"`
+	Status   string          `json:"status"` // pending | approved | replanned | cancelled | expired
+	Feedback string          `json:"feedback"`
+	Created  int64           `json:"created"`
+}
+
+// SavePlan stores v as the agent's pending draft and returns its id.
+func (s *Store) SavePlan(agentID, kind string, v any) (int64, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0, err
+	}
+	res, err := s.db.Exec(`INSERT INTO plans(agent_id, kind, json, created) VALUES(?,?,?,?)`, agentID, kind, string(b), time.Now().UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// PendingPlan returns the agent's draft waiting for a decision; sql.ErrNoRows when there is none.
+func (s *Store) PendingPlan(agentID string) (p Plan, err error) {
+	var raw string
+	err = s.db.QueryRow(`SELECT id, agent_id, kind, json, status, feedback, created FROM plans WHERE agent_id=? AND status='pending' ORDER BY id DESC LIMIT 1`, agentID).
+		Scan(&p.ID, &p.Agent, &p.Kind, &raw, &p.Status, &p.Feedback, &p.Created)
+	p.JSON = json.RawMessage(raw)
+	return
+}
+
+// DecidePlan records the decision on a pending draft, with the plan as the user left it when v
+// isn't nil. It reports false when the draft was already decided, so only one decision wins.
+func (s *Store) DecidePlan(id int64, status, feedback string, v any) bool {
+	q, args := `UPDATE plans SET status=?, feedback=?, decided=? WHERE id=? AND status='pending'`, []any{status, feedback, time.Now().UnixMilli(), id}
+	if v != nil {
+		b, _ := json.Marshal(v)
+		q, args = `UPDATE plans SET status=?, feedback=?, decided=?, json=? WHERE id=? AND status='pending'`, []any{status, feedback, time.Now().UnixMilli(), string(b), id}
+	}
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		log.Printf("DecidePlan: %v", err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n == 1
 }
 
 // NewRun starts a run record for one attempt and returns its id.

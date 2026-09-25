@@ -142,3 +142,36 @@ func TestTypes(t *testing.T) {
 		t.Fatal("type not deleted")
 	}
 }
+
+// Only one decision lands on a draft, and a restart expires drafts nobody is waiting on anymore.
+func TestPlanDrafts(t *testing.T) {
+	s, path := open(t)
+	id, err := s.SavePlan("m", "plan", map[string]any{"subgoals": []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.PendingPlan("m"); err != nil || p.ID != id || p.Kind != "plan" {
+		t.Fatalf("pending: %+v %v", p, err)
+	}
+	if !s.DecidePlan(id, "replanned", "smaller", nil) || s.DecidePlan(id, "approved", "", nil) {
+		t.Fatal("exactly the first decision should land")
+	}
+	if _, err := s.PendingPlan("m"); err == nil {
+		t.Fatal("a decided draft isn't pending")
+	}
+	id2, _ := s.SavePlan("m", "plan", map[string]any{})
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	var status string
+	s2.SQL().QueryRow(`SELECT status FROM plans WHERE id=?`, id2).Scan(&status)
+	if status != "expired" {
+		t.Fatalf("draft after restart: %q", status)
+	}
+	if as, _ := s2.Agents(func() string { ps, _ := s2.Projects(); return ps[0].ID }()); as[0].ApprovePlan {
+		t.Fatal("plan approval is opt-in")
+	}
+}

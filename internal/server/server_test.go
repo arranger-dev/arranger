@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -498,5 +499,55 @@ func TestRequestChangesAPI(t *testing.T) {
 	}
 	if g, _ := a.st.Goal("k"); g.Status != "done" || g.Title != "write out.txt" {
 		t.Fatalf("goal kept, run done: %+v", g)
+	}
+}
+
+// A manager that asks for approval waits with its plan; the page reads it, can't move its
+// reports meanwhile, and approves it through the API.
+func TestPlanApprovalAPI(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, "plan.sh"), []byte(`cat >/dev/null; echo '{"subgoals":[{"agent":"k","title":"do it","checks":["true"]}]}'`+"\n"), 0o644)
+	git.Commit(repo, "add plan.sh")
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	arrangement := `[{"id":"m","name":"Lead","role":"manager","approvePlan":true},{"id":"k","name":"Kid","role":"coder","parent":"m"}]`
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", arrangement)
+	if m, _, _ := a.st.Agent("m"); !m.ApprovePlan {
+		t.Fatal("a new agent should take approvePlan from the arrangement")
+	}
+	a.must(204, "PUT", "/api/agents/m", `{"name":"Lead","runtime":"generic","args":"sh plan.sh","approvePlan":true}`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(204, "PUT", "/api/agents/m/goal", `{"title":"lead","checks":"true"}`)
+	a.must(404, "GET", "/api/agents/m/plan", "")
+
+	a.must(202, "POST", "/api/agents/m/run", "")
+	var draft store.Plan
+	for deadline := time.Now().Add(20 * time.Second); draft.ID == 0; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no plan to approve")
+		}
+		if code, body := a.do("GET", "/api/agents/m/plan", ""); code == 200 {
+			json.Unmarshal([]byte(body), &draft)
+		}
+	}
+	if draft.Kind != "plan" || !strings.Contains(string(draft.JSON), "do it") {
+		t.Fatalf("draft: %+v", draft)
+	}
+	a.must(409, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"m","name":"Lead","role":"manager"},{"id":"k","name":"Kid","role":"coder"}]`)
+	id := strconv.FormatInt(draft.ID, 10)
+	a.must(409, "POST", "/api/agents/m/plan", `{"draft":`+id+`1,"action":"approve"}`)
+	a.must(400, "POST", "/api/agents/m/plan", `{"draft":`+id+`,"action":"approve","subgoals":[{"agent":"k","title":"no checks"}]}`)
+	a.must(202, "POST", "/api/agents/m/plan", `{"draft":`+id+`,"action":"approve","subgoals":[{"agent":"k","title":"do it now","checks":["true"]}]}`)
+	for deadline := time.Now().Add(20 * time.Second); a.o.IsRunning("m"); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("run never finished")
+		}
+	}
+	if g, _ := a.st.Goal("m"); g.Status != "done" {
+		t.Fatalf("manager: %+v", g)
+	}
+	if g, _ := a.st.Goal("k"); g.Title != "do it now" || g.Status != "done" {
+		t.Fatalf("report runs the approved goal: %+v", g)
 	}
 }

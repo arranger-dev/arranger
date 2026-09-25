@@ -12,7 +12,7 @@
   --bg: #f4f5f8; --grid: #0b0d140b; --panel: #fff; --sunk: #f0f1f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
   --accent: #3d6fe0; --on-accent: #fff; --drop: #3d6fe01f;
   --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
-  --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079;
+  --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079; --awaiting: #d9730d;
   --add-bg: #e6f4ea; --del-bg: #fdecec; --link: #8b919c;
   font: 14px/1.4 var(--sans);
 }
@@ -20,7 +20,7 @@
   --bg: #0e0f12; --grid: #c0caf509; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
   --accent: #7aa2f7; --on-accent: #0e0f12; --drop: #7aa2f733;
   --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a;
-  --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98;
+  --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98; --awaiting: #ff9e64;
   --add-bg: #1f2d22; --del-bg: #331f24; --link: #6b7280;
 }
 * { box-sizing: border-box; border-radius: 0; }
@@ -40,20 +40,33 @@ textarea { resize: vertical; min-height: 60px; }
 .mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
 label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
 
-header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 7px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header button.icon { width: 30px; padding: 5px 0; text-align: center; color: var(--muted); }
+header button.icon:hover { color: var(--text); }
+header .proj { display: flex; }
+header .proj > * + * { margin-left: -1px; }
+header .proj select { max-width: 200px; }
 header h1 { font: 600 14px var(--mono); margin: 0 8px 0 0; }
 header h1 a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 8px; }
 header h1 img { width: 22px; height: 22px; display: block; }
 header select { width: auto; }
 .sp { flex: 1; }
-#bar { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--muted); }
-#bar .prog { width: 120px; height: 6px; background: var(--sunk); border: 1px solid var(--line); }
-#bar .prog i { display: block; height: 100%; background: var(--done); width: 0; }
+#bar { display: flex; align-items: stretch; height: 30px; margin-left: 8px; border: 1px solid var(--line); background: var(--sunk); font-size: 12px; color: var(--muted); }
+#bar > * { display: flex; align-items: center; gap: 6px; padding: 0 12px; white-space: nowrap; }
+#bar > * + * { border-left: 1px solid var(--line); }
+#bar > [hidden] { display: none; }
+#bar > button { border: 0; border-left: 1px solid var(--line); background: none; font-size: 12px; color: var(--muted); }
+#bar > button:hover { background: var(--panel); color: var(--text); }
 #bar b { color: var(--text); font-weight: 600; }
 #needs { position: relative; }
-#needs summary { cursor: pointer; list-style: none; color: var(--failed); font-weight: 600; }
-#needs[data-n="0"] summary { color: var(--muted); font-weight: 400; }
-#needs ul { position: absolute; top: 22px; left: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); margin: 0; padding: 4px 0; list-style: none; min-width: 220px; }
+#needs summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; height: 100%; color: var(--s); font-weight: 600; }
+#needs summary::-webkit-details-marker { display: none; }
+#needs summary b { color: inherit; }
+#needs[data-n="0"] { display: none; }
+#needs, #needs[data-kind=fail] { --s: var(--failed); } #needs[data-kind=plan] { --s: var(--awaiting); }
+#needs .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--s); box-shadow: 0 0 0 0 var(--s); animation: beacon 1.4s ease-out infinite; }
+@keyframes beacon { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--s) 70%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
+#needs ul { position: absolute; top: 29px; left: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); margin: 0; padding: 4px 0; list-style: none; min-width: 220px; }
 #needs li { padding: 6px 12px; cursor: pointer; color: var(--text); }
 #needs li:hover { background: var(--sunk); }
 #msg { font-size: 12px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -103,12 +116,11 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 .card.busy .now { color: var(--text); }
 .card .elapsed { color: var(--s); font-weight: 600; }
 @keyframes sweep { from { background-position: -60% 0; } to { background-position: 160% 0; } }
-#bar .live { display: inline-block; width: 8px; height: 8px; background: var(--running); margin-right: 4px; vertical-align: middle; animation: pulse 1s infinite alternate; }
-#bar .live[hidden] { display: none; }
+#bar .live { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--running); animation: pulse 1s infinite alternate; }
 @media (prefers-reduced-motion: reduce) {
   #links path.flow { animation: none; }
   .card.busy::after { animation: none; background: var(--s); }
-  .st::before, #bar .live { animation: none !important; }
+  .st::before, #bar .live, #needs .dot { animation: none !important; }
 }
 .st::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: var(--s, var(--idle)); }
 .busy .st::before, .st.busy::before { animation: pulse 1s infinite alternate; }
@@ -116,6 +128,11 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 [data-status=starting], [data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
 [data-status=failed], [data-status=blocked] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
 [data-status=planning], [data-status=waiting], [data-status=reviewing] { --s: var(--manager); }
+[data-status=awaiting] { --s: var(--awaiting); }
+.card[data-status=awaiting] { border-color: var(--s); border-left-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s) 22%, transparent); }
+.card[data-status=awaiting] .st::before, .st[data-status=awaiting]::before { animation: pulse 1s infinite alternate; }
+.card.proposed .now { font-style: italic; opacity: .75; }
+.card.left-out { opacity: .45; }
 .ok { color: var(--done); } .bad { color: var(--failed); }
 [data-role=manager] { --c: var(--manager); } [data-role=coder] { --c: var(--coder); }
 [data-role=reviewer] { --c: var(--reviewer); } [data-role=tester] { --c: var(--tester); }
@@ -190,6 +207,27 @@ body.resizing { cursor: col-resize; user-select: none; }
 #log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
 #log .ev[data-kind=request] .k, #log .ev[data-kind=request] .x { color: var(--accent); font-weight: 600; }
 /* the way to iterate once an agent has run: say what should change, re-run only what it concerns */
+#g-working { display: flex; align-items: center; gap: 2px; margin-top: 14px; padding: 8px 12px; border: 1px solid var(--s); border-left-width: 3px;
+  background: color-mix(in srgb, var(--s) 8%, var(--panel)); font-weight: 600; }
+#g-working[hidden] { display: none; }
+label.check { display: flex; gap: 6px; align-items: center; font-weight: 400; color: var(--text); }
+label.check input { width: auto; margin: 0; }
+#g-approve-row { margin-top: 10px; }
+#g-working-note { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+#g-working-note:empty { display: none; }
+#g-working .st::before { width: 9px; height: 9px; margin-right: 8px; border-radius: 50%; }
+#plan-review { margin-top: 14px; padding: 4px 12px 12px; background: var(--sunk); border: 1px solid var(--line); border-left: 3px solid var(--awaiting); }
+#plan-review h3 { margin: 8px 0 2px; font-size: 14px; }
+#plan-review .pr-item { background: var(--panel); border: 1px solid var(--line); margin-top: 8px; }
+#plan-review .pr-item > summary { display: flex; gap: 8px; align-items: center; padding: 6px 10px; cursor: pointer; }
+#plan-review .pr-item > summary .who { font-weight: 600; white-space: nowrap; }
+#plan-review .pr-item > summary .what { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#plan-review .pr-item .fields { padding: 0 10px 10px; }
+#plan-review .pr-item.out { display: flex; gap: 8px; align-items: center; padding: 6px 10px; color: var(--muted); }
+#plan-review .pr-item.out .who { font-weight: 600; color: var(--text); }
+#plan-review .pr-item.out .what { flex: 1; }
+#plan-review .warn { color: var(--awaiting); font-size: 12px; margin: 6px 0 0; }
+#plan-review .row { flex-wrap: wrap; }
 #revise { margin-top: 14px; padding: 4px 12px 10px; background: var(--sunk); border: 1px solid var(--line); border-left: 3px solid var(--accent); }
 #revise label { color: var(--text); font-weight: 600; font-size: 13px; }
 #revise .hint { margin-top: 6px; }
@@ -224,22 +262,21 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 
 <header>
   <h1><a href="/arrange"><img src="/arranger.png" alt="">arranger</a></h1>
-  <select id="project" aria-label="Project">
-    {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
-  </select>
-  <button id="new-project" title="New project">+ New</button>
-  <button id="edit-project" title="Project settings">Settings</button>
+  <div class="proj">
+    <select id="project" aria-label="Project">
+      {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
+    </select>
+    <button id="edit-project" class="icon" title="Project settings" aria-label="Project settings">⚙</button>
+    <button id="new-project" class="icon" title="New project" aria-label="New project">+</button>
+  </div>
   <div id="bar">
-    <span class="prog"><i></i></span>
-    <span><b id="n-done">0</b>/<b id="n-goals">0</b> done</span>
-    <span><span class="live" hidden></span><b id="n-running">0</b> running</span>
-    <details id="needs" data-n="0"><summary>Needs you (<span id="n-needs">0</span>)</summary><ul></ul></details>
-    <span>$<b id="cost">0.00</b></span>
+    <span id="running" hidden><span class="live"></span><b id="n-running">0</b> running</span>
+    <details id="needs" data-n="0"><summary><span class="dot"></span>Needs you (<b id="n-needs">0</b>)</summary><ul></ul></details>
+    <button id="stats" title="Stats: cost, time and success across the project">$<b id="cost">0.00</b></button>
   </div>
   <span class="sp"></span>
   <span id="msg"></span>
-  <button id="stats" title="Cost, time and success across the project">Stats</button>
-  <button id="theme" title="Toggle theme">◐</button>
+  <button id="theme" class="icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
   <button id="save">Save</button>
   <button id="run-all" class="primary">Run all</button>
 </header>
@@ -283,6 +320,21 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <button data-tab="goal" class="on">Goal</button><button data-tab="logs">Logs</button><button data-tab="diff">Diff</button><button data-tab="settings">Settings</button>
   </div>
   <form class="pane" data-pane="goal" id="goal-form">
+    <div id="g-working" hidden><span class="st busy" id="g-working-dot"></span><span><span id="g-working-text"></span><span id="g-working-note"></span></span></div>
+    <div id="plan-review" hidden>
+      <h3 id="pr-title"></h3>
+      <p class="hint" id="pr-sub" style="margin-top:0"></p>
+      <div id="pr-items"></div>
+      <label for="pr-feedback">Feedback on the plan (optional)</label>
+      <textarea id="pr-feedback" rows="2" placeholder="What should the new plan do differently? e.g. Give the database work to DB Coder."></textarea>
+      <div class="row">
+        <button type="button" class="primary" id="pr-approve">Approve and run</button>
+        <button type="button" id="pr-replan">Plan again with feedback</button>
+        <span class="sp" style="flex:1"></span>
+        <button type="button" class="danger" id="pr-cancel">Cancel</button>
+      </div>
+      <p class="status" id="pr-msg" role="status"></p>
+    </div>
     <div id="revise" hidden>
       <label for="r-change">Request changes</label>
       <textarea id="r-change" rows="3" placeholder="What should be different? e.g. Webhooks should retry 3 times; the checkout button should say Subscribe."></textarea>
@@ -295,6 +347,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <label>Acceptance criteria</label><textarea name="criteria" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
     <label>Checks: one shell command per line, all must exit 0</label><textarea name="checks" class="mono" placeholder="go test ./..."></textarea>
     <p id="g-hint" class="hint"></p>
+    <label id="g-approve-row" class="check"><input type="checkbox" id="g-approve"> Let me approve the plan before the team runs</label>
     <div id="g-feedback" hidden><label>Last failure</label><div class="feedback mono"></div></div>
     <div class="row"><button class="primary">Save goal</button><span id="g-state" class="hint" style="margin:0"></span></div>
     <p class="status" id="g-msg" role="status"></p>
@@ -326,6 +379,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <div class="colorrow"><input type="color" name="color" id="a-color"><button type="button" id="a-color-reset">Use role color</button></div>
     <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash  (generic: the whole command)">
     <label>Instructions</label><textarea name="prompt" rows="6" placeholder="How this agent should work"></textarea>
+    <label id="a-approve-row" style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" name="approvePlan" style="width:auto"> Let me approve the plan before the team runs</label>
     <div class="pair">
       <div><label>Soft token limit (warns)</label><input name="tokenSoft" type="number" min="0" step="1000" placeholder="none"></div>
       <div><label>Hard token limit (stops)</label><input name="tokenHard" type="number" min="0" step="1000" placeholder="none"></div>
@@ -386,7 +440,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <form method="dialog">
     <h3></h3>
     <p class="hint" id="c-text"></p>
-    <div class="row"><button class="primary danger" value="ok" id="c-ok"></button><button value="cancel" id="c-cancel">Cancel</button></div>
+    <div class="row"><button class="primary danger" value="ok" id="c-ok"></button><button value="cancel" id="c-cancel"></button></div>
   </form>
 </dialog>
 

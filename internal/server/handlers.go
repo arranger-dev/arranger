@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"arranger/internal/agents"
 	"arranger/internal/git"
+	"arranger/internal/orch"
 	"arranger/internal/store"
 )
 
@@ -90,9 +92,22 @@ func (s *Server) saveArrangement(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	parent := map[string]string{}
+	for _, a := range as {
+		parent[a.ID] = a.Parent
+	}
+	names := map[string]string{}
+	for _, a := range old {
+		names[a.ID] = a.Name
+	}
 	for _, a := range old {
 		if !keep[a.ID] && s.o.IsRunning(a.ID) {
 			fail(w, http.StatusConflict, fmt.Errorf("%s is running; stop it before removing it", a.Name))
+			return
+		}
+		// a waiting plan names its manager's reports; they stay put until it's decided
+		if a.Parent != "" && s.o.Awaiting(a.Parent) && (!keep[a.ID] || parent[a.ID] != a.Parent) {
+			fail(w, http.StatusConflict, fmt.Errorf("%s's plan is waiting for you; approve or cancel it before moving or removing %s", names[a.Parent], a.Name))
 			return
 		}
 	}
@@ -178,6 +193,36 @@ func (s *Server) revise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.o.Revise(r.PathValue("id"), req.Change); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// getPlan returns the agent's plan waiting for the user's decision.
+func (s *Server) getPlan(w http.ResponseWriter, r *http.Request) {
+	p, err := s.st.PendingPlan(r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) || err == nil && !s.o.Awaiting(p.Agent) {
+		http.Error(w, "no plan is waiting for a decision", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, p)
+}
+
+// decidePlan approves (possibly edited), sends back, or cancels the agent's waiting plan.
+func (s *Server) decidePlan(w http.ResponseWriter, r *http.Request) {
+	var d orch.Decision
+	if !readJSON(w, r, &d) {
+		return
+	}
+	if err := s.o.Decide(r.PathValue("id"), d); errors.Is(err, orch.ErrStale) {
+		fail(w, http.StatusConflict, err)
+		return
+	} else if err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}

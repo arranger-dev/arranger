@@ -234,8 +234,9 @@ main.addEventListener("pointerdown", e => {
   };
 });
 // ask shows the styled confirm dialog and resolves true when the user presses the action button.
-function ask(title, text, action) {
+function ask(title, text, action, keep = "Cancel") {
   const d = $("#confirm-dialog");
+  $("#c-cancel").textContent = keep;
   $("h3", d).textContent = title;
   $("#c-text").textContent = text;
   $("#c-text").hidden = !text;
@@ -456,6 +457,32 @@ $("#i-dir").onclick = async e => {
   catch { say("Couldn't copy the path", true); }
 };
 
+// selAgent is the selected agent's settings as last saved.
+let selAgent = null;
+
+// showApprove shows the plan-approval setting, in Settings and next to the goal, for managers only.
+function showApprove(on) {
+  const manager = selected && kidsOf(selected).length > 0;
+  aform.elements.approvePlan.checked = $("#g-approve").checked = on;
+  $("#a-approve-row").style.display = $("#g-approve-row").style.display = manager ? "flex" : "none";
+}
+
+// The Goal tab's checkbox saves the setting right away; the rest of the settings stay as saved.
+$("#g-approve").onchange = async e => {
+  const on = e.target.checked, id = selected;
+  try {
+    await api("PUT", `/api/agents/${encodeURIComponent(id)}`, { ...selAgent, approvePlan: on });
+    if (id !== selected) return;
+    selAgent.approvePlan = on;
+    agents.get(id).approvePlan = on;
+    aform.elements.approvePlan.checked = on;
+    status($("#g-msg"), on ? `${nameOf(id)} will show you its plan before its team runs.` : `${nameOf(id)}'s team starts as soon as it has a plan.`);
+  } catch (err) {
+    e.target.checked = !on;
+    status($("#g-msg"), err.message, true);
+  }
+};
+
 async function select(id) {
   let data;
   try { data = await api("GET", `/api/agents/${encodeURIComponent(id)}`); }
@@ -465,6 +492,7 @@ async function select(id) {
   cardOf(id)?.classList.add("sel");
   insp.hidden = false;
   const { agent: a, goal: g } = data;
+  selAgent = a;
   $("#i-name").textContent = a.name;
   const d = $("#i-dir");
   d.textContent = data.dir ? `(${data.dir})` : "";
@@ -474,6 +502,7 @@ async function select(id) {
   for (const k of ["name", "runtime", "model", "args", "prompt"]) aform.elements[k].value = a[k];
   aform.elements.tokenSoft.value = a.tokenSoft || "";
   aform.elements.tokenHard.value = a.tokenHard || "";
+  showApprove(a.approvePlan);
   colorChoice = a.color || "";
   if (agents.has(id)) agents.get(id).color = colorChoice;
   $("#a-color").value = colorChoice || roleColor(id);
@@ -483,6 +512,7 @@ async function select(id) {
   status($("#g-msg"), "");
   if (id !== revisingFor) { $("#r-change").value = ""; status($("#r-msg"), ""); } // a draft belongs to its agent
   showGoalState(g);
+  renderPlan();
   renderStats();
   showTab(tab);
 }
@@ -510,7 +540,7 @@ $("#a-parent").onchange = e => {
 function showGoalState(g) {
   const mgr = parentOf(selected), team = kidsOf(selected);
   // once an agent has run (and isn't running), changes go through Request changes, not goal edits
-  $("#revise").hidden = !g.title || g.status === "idle" || BUSY.includes(g.status);
+  $("#revise").hidden = !g.title || g.status === "idle" || g.status === "awaiting" || BUSY.includes(g.status);
   $("#r-hint").textContent = team.length
     ? `${nameOf(selected)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(selected)} reviews and merges the changes and runs its checks again.`
     : `${nameOf(selected)} keeps its work and changes only this, then its checks run again.`;
@@ -528,8 +558,24 @@ function showGoalState(g) {
 // limitClass says whether a token count is past the agent's soft or hard limit.
 const limitClass = st => st.tokenHard && st.tokens >= st.tokenHard ? "over" : st.tokenSoft && st.tokens >= st.tokenSoft ? "warn" : "";
 
+// WORKING says what a busy agent is doing, for the banner at the top of its Goal tab.
+const WORKING = { starting: "is starting", running: "is working", verifying: "is running its checks", planning: "is planning for its team",
+                  waiting: "is waiting for its team", reviewing: "is reviewing its team's work" };
+
+function renderWorking(st) {
+  const box = $("#g-working"), busy = st && BUSY.includes(st.status);
+  box.hidden = !busy;
+  if (!busy) return;
+  box.dataset.status = st.status;
+  $("#g-working-dot").dataset.status = st.status;
+  $("#g-working-text").textContent = `${nameOf(selected)} ${WORKING[st.status] ?? st.status}` + (st.since ? ` · ${fmtDur(Date.now() - st.since)}` : "");
+  $("#g-working-note").textContent = st.status === "planning" && agents.get(selected)?.approvePlan
+    ? "It's reading the repo and writing the plan. The plan shows up here for your approval; nothing runs until you approve it." : "";
+}
+
 function renderStats() {
   const st = selected && summary.agents[selected], box = $("#i-stats");
+  renderWorking(st);
   if (!st) { box.replaceChildren(); return; }
   const parts = [el("span", "", st.status)];
   if (BUSY.includes(st.status) && st.since) parts.push(el("span", "", "working " + fmtDur(Date.now() - st.since)));
@@ -575,11 +621,14 @@ aform.onsubmit = async e => {
   e.preventDefault();
   const f = aform.elements;
   const body = { name: f.name.value, runtime: f.runtime.value, model: f.model.value, args: f.args.value, prompt: f.prompt.value,
-                 tokenSoft: Number(f.tokenSoft.value) || 0, tokenHard: Number(f.tokenHard.value) || 0, color: colorChoice };
+                 tokenSoft: Number(f.tokenSoft.value) || 0, tokenHard: Number(f.tokenHard.value) || 0, color: colorChoice,
+                 approvePlan: f.approvePlan.checked };
   try {
     await api("PUT", `/api/agents/${selected}`, body);
     const a = agents.get(selected);
-    Object.assign(a, { name: body.name, runtime: body.runtime, color: body.color });
+    Object.assign(a, { name: body.name, runtime: body.runtime, color: body.color, approvePlan: body.approvePlan });
+    Object.assign(selAgent, body);
+    $("#g-approve").checked = body.approvePlan;
     paintCard(a);
     $("#i-name").textContent = a.name;
     status($("#a-msg"), dirty ? "Settings saved. The arrangement still has unsaved changes." : "Saved.");
@@ -608,7 +657,9 @@ $("#i-run").onclick = async e => {
     await api("PUT", `/api/agents/${id}/goal`, goalBody()); // Run uses what's in the form, saved or not
     await api("POST", `/api/agents/${id}/run`);
     setStatus(id, "starting");
-    runMsg(isManager ? `${nameOf(id)} is planning for its team.` : `${nameOf(id)} is working.`);
+    runMsg(!isManager ? `${nameOf(id)} is working.` : agents.get(id)?.approvePlan
+      ? `${nameOf(id)} is planning. You'll review the plan here before anyone on the team starts.`
+      : `${nameOf(id)} is planning for its team.`);
     refreshSummary();
     showTab("logs");
   } catch (err) { runMsg(err.message, true); }
@@ -645,7 +696,7 @@ $("#i-clone").onclick = async () => {
     const { x, y } = parent ? slotUnder(parent) : { x: s.x + GAP_X, y: s.y };
     const a = addAgent(s.role, src.name + " copy", null, x, y, parent);
     Object.assign(a, { runtime: src.runtime, color: src.color,
-      defaults: { model: src.model, args: src.args, prompt: src.prompt, tokenSoft: src.tokenSoft, tokenHard: src.tokenHard } });
+      defaults: { model: src.model, args: src.args, prompt: src.prompt, tokenSoft: src.tokenSoft, tokenHard: src.tokenHard, approvePlan: src.approvePlan } });
     paintCard(a);
     await save();
     refreshCards();
@@ -653,6 +704,159 @@ $("#i-clone").onclick = async () => {
   } catch (e) { say(e.message, true); }
 };
 $("#i-stop").onclick = () => api("POST", `/api/agents/${selected}/stop`).then(() => runMsg("Stopping…")).catch(e => runMsg(e.message, true));
+
+/* ---------- plan approval ---------- */
+
+// plans: manager id -> its draft plan waiting for the user's decision
+const plans = new Map();
+const baseTitle = document.title;
+const planItems = d => d.plan.subgoals || d.plan.changes || [];
+
+// loadPlan fetches the manager's waiting plan. Only the newest request per manager counts: an older
+// one can come back after it, e.g. "no plan" from just before a new plan was made.
+const planLoads = new Map();
+async function loadPlan(id) {
+  const n = (planLoads.get(id) ?? 0) + 1;
+  planLoads.set(id, n);
+  let d = null;
+  try { d = await api("GET", `/api/agents/${encodeURIComponent(id)}/plan`); } catch {}
+  if (planLoads.get(id) !== n) return;
+  d ? plans.set(id, d) : plans.delete(id);
+  planChanged(id);
+}
+
+function planChanged(id) {
+  document.title = (plans.size ? "Plan ready · " : "") + baseTitle;
+  refreshCards();
+  if (id === selected) renderPlan();
+}
+
+// syncPlans fetches drafts for managers that wait on the user and drops the ones that don't anymore.
+function syncPlans() {
+  for (const [id, s] of Object.entries(summary.agents)) if (s.status === "awaiting" && !plans.has(id)) loadPlan(id);
+  for (const id of [...plans.keys()]) if (summary.agents[id]?.status !== "awaiting") { plans.delete(id); planChanged(id); }
+}
+
+// planEdit is the plan as the user is editing it: report id -> {on, f}, for one draft.
+let planEdit = null;
+
+function renderPlan() {
+  const d = selected && plans.get(selected);
+  $("#plan-review").hidden = !d;
+  if (!d) { planEdit = null; return; }
+  if (planEdit?.draft !== d.id) {
+    const items = new Map();
+    for (const k of kidsOf(selected)) {
+      const x = planItems(d).find(i => i.agent === k.id);
+      items.set(k.id, { on: !!x, f: x ? { ...structuredClone(x), checks: x.checks || [] }
+        : d.kind === "revision" ? { agent: k.id, change: "", checks: [] } : { agent: k.id, title: "", body: "", criteria: "", checks: [] } });
+    }
+    planEdit = { draft: d.id, kind: d.kind, mgr: selected, items, open: planItems(d)[0]?.agent };
+    $("#pr-feedback").value = "";
+    status($("#pr-msg"), "");
+  }
+  drawPlan();
+}
+
+const WEAK_CHECK = /^(true|:|exit 0|pwd|ls(\s.*)?|echo(\s.*)?)$/;
+function checkWarnings(kind, checks) {
+  const ws = checks.filter(c => WEAK_CHECK.test(c)).map(c => `\`${c}\` can't fail, so it proves nothing.`);
+  if (kind === "plan" && !checks.length) ws.unshift("No checks: nothing can prove this is done.");
+  return ws;
+}
+const checkLines = v => v.split("\n").map(l => l.trim()).filter(Boolean);
+
+function drawPlan() {
+  const { kind, mgr, items } = planEdit, on = [...items.values()].filter(i => i.on).length;
+  const st = summary.agents[mgr];
+  $("#pr-title").textContent = kind === "revision" ? `${nameOf(mgr)}'s plan for your change` : `${nameOf(mgr)}'s plan`;
+  $("#pr-sub").textContent = `${on} of ${items.size} reports get work` + (st?.cost ? ` · planning cost $${st.cost.toFixed(2)}` : "") +
+    ". Nothing runs until you approve.";
+  $("#pr-approve").disabled = on === 0;
+  $("#pr-approve").title = on ? "" : "Give at least one report work, or cancel.";
+  $("#pr-items").replaceChildren(...[...items].map(([id, it]) => it.on ? planCard(id, it) : leftOut(id, it)));
+}
+
+// planCard is one report's part of the plan, editable in place.
+function planCard(id, it) {
+  const det = el("details", "pr-item"), sum = el("summary"), f = it.f, team = kidsOf(id).length;
+  det.open = planEdit.open === id;
+  det.ontoggle = () => { if (det.open) planEdit.open = id; };
+  const what = el("span", "what");
+  const showWhat = () => what.textContent = (team ? `manager, ${team} reports · ` : "") + (planEdit.kind === "revision" ? f.change : f.title);
+  showWhat();
+  const skip = el("button", "", "Skip");
+  skip.type = "button";
+  skip.title = "Leave this report out of this run; its current goal stays";
+  skip.onclick = e => { e.preventDefault(); it.on = false; drawPlan(); };
+  sum.append(el("span", "who", nameOf(id)), what, skip);
+
+  const fields = el("div", "fields"), warn = el("div");
+  const showWarn = () => warn.replaceChildren(...checkWarnings(planEdit.kind, f.checks).map(w => el("p", "warn", "⚠ " + w)));
+  const field = (label, key, tag = "textarea", cls = "") => {
+    const input = el(tag, cls);
+    input.value = key === "checks" ? f.checks.join("\n") : f[key] ?? "";
+    input.oninput = () => {
+      if (key === "checks") { f.checks = checkLines(input.value); showWarn(); } else { f[key] = input.value; showWhat(); }
+    };
+    fields.append(el("label", "", label), input);
+  };
+  if (planEdit.kind === "revision") {
+    field("Change", "change");
+    field("New checks (optional), one per line", "checks", "textarea", "mono");
+  } else {
+    field("Goal", "title", "input");
+    field("Details", "body");
+    field("Acceptance criteria", "criteria");
+    field("Checks: one shell command per line, all must exit 0", "checks", "textarea", "mono");
+  }
+  fields.append(warn);
+  showWarn();
+  det.append(sum, fields);
+  return det;
+}
+
+// leftOut is a report the plan gives no work, with a way to bring it in.
+function leftOut(id, it) {
+  const row = el("div", "pr-item out"), noGoal = planEdit.kind === "revision" && !summary.agents[id]?.title;
+  const add = el("button", "", "Add");
+  add.type = "button";
+  add.disabled = noGoal;
+  add.onclick = () => { it.on = true; planEdit.open = id; drawPlan(); $("#pr-items details[open] input, #pr-items details[open] textarea")?.focus(); };
+  row.append(el("span", "who", nameOf(id)), el("span", "what", noGoal ? "no goal yet, so no work to change" : planEdit.kind === "revision" ? "no change" : "not in this plan"), add);
+  return row;
+}
+
+async function decidePlan(btn, body, working, done) {
+  const mgr = planEdit.mgr, draft = planEdit.draft;
+  btn.disabled = true;
+  status($("#pr-msg"), working);
+  try {
+    await api("POST", `/api/agents/${encodeURIComponent(mgr)}/plan`, { draft, ...body });
+    if (plans.get(mgr)?.id === draft) { plans.delete(mgr); planChanged(mgr); } // a new plan may already be here
+    planLoads.set(mgr, (planLoads.get(mgr) ?? 0) + 1); // and a request still in flight must not bring the old one back
+    runMsg(done);
+    refreshSummary();
+  } catch (err) {
+    status($("#pr-msg"), err.message, true);
+    loadPlan(mgr); // it may have been decided elsewhere, or replaced; edits to the same draft are kept
+  }
+  btn.disabled = false;
+}
+
+$("#pr-approve").onclick = e => {
+  const on = [...planEdit.items.values()].filter(i => i.on).map(i => i.f);
+  const body = planEdit.kind === "revision" ? { action: "approve", changes: on } : { action: "approve", subgoals: on };
+  decidePlan(e.currentTarget, body, "Approving…", `${nameOf(planEdit.mgr)} is running its team.`);
+};
+$("#pr-replan").onclick = e => {
+  decidePlan(e.currentTarget, { action: "replan", feedback: $("#pr-feedback").value.trim() }, "Asking for a new plan…", `${nameOf(planEdit.mgr)} is planning again.`);
+};
+$("#pr-cancel").onclick = async e => {
+  const btn = e.currentTarget;
+  if (!await ask(`Cancel ${nameOf(planEdit.mgr)}'s plan?`, "The run stops and no report's goal changes.", "Cancel plan", "Keep it")) return;
+  decidePlan(btn, { action: "cancel" }, "Cancelling…", `${nameOf(planEdit.mgr)}'s plan was cancelled.`);
+};
 
 /* ---------- logs ---------- */
 
@@ -885,6 +1089,10 @@ function refreshCards() {
     const busy = BUSY.includes(card.dataset.status);
     card.classList.toggle("busy", busy);
     card.querySelector(".now").textContent = st?.now || (st?.title ? "goal: " + st.title : "no goal yet");
+    const draft = plans.get(parentOf(a.id)), item = draft && planItems(draft).find(x => x.agent === a.id);
+    card.classList.toggle("proposed", !!item);
+    card.classList.toggle("left-out", !!draft && !item);
+    if (item) card.querySelector(".now").textContent = draft.kind === "revision" ? "proposed change: " + item.change : "proposed: " + item.title;
     const b = card.querySelector(".badges");
     b.replaceChildren();
     if (!st) continue;
@@ -911,21 +1119,19 @@ async function refreshSummary() {
   refreshCards();
   renderStats();
   const all = Object.entries(summary.agents);
-  const goals = all.filter(([, s]) => s.title);
-  const done = goals.filter(([, s]) => s.status === "done").length;
-  const needs = all.filter(([, s]) => NEEDS.includes(s.status));
+  const needs = all.filter(([, s]) => NEEDS.includes(s.status) || s.status === "awaiting");
+  syncPlans();
   const running = all.filter(([, s]) => BUSY.includes(s.status)).length;
-  $("#n-done").textContent = done;
-  $("#n-goals").textContent = goals.length;
   $("#n-running").textContent = running;
-  $("#bar .live").hidden = running === 0;
-  $("#bar .prog i").style.width = goals.length ? (100 * done / goals.length) + "%" : 0;
+  $("#running").hidden = running === 0;
   $("#cost").textContent = summary.cost.toFixed(2);
   $("#n-needs").textContent = needs.length;
   $("#needs").dataset.n = needs.length;
+  $("#needs").dataset.kind = needs.every(([, s]) => s.status === "awaiting") ? "plan" : "fail"; // amber for plans, red for failures
+  if (!needs.length) $("#needs").open = false;
   $("#needs ul").replaceChildren(...needs.map(([id, s]) => {
-    const li = el("li", "", `✗ ${nameOf(id)}: ${s.status} · ${s.title}`);
-    li.onclick = () => { $("#needs").open = false; select(id); };
+    const li = el("li", "", s.status === "awaiting" ? `⏸ ${nameOf(id)}: plan waiting for your approval` : `✗ ${nameOf(id)}: ${s.status} · ${s.title}`);
+    li.onclick = () => { $("#needs").open = false; if (s.status === "awaiting") tab = "goal"; select(id); };
     return li;
   }));
   if (selected && summary.agents[selected]) {
@@ -979,6 +1185,8 @@ es.onmessage = m => {
     }
     if (e.agent === selected && tab === "logs") appendLive(e);
     if (e.agent === selected && e.kind !== "stderr") scheduleLiveDiff(); // it edited files, ran a tool, checkpointed...
+  } else if (msg.type === "plan") {
+    loadPlan(msg.agent);
   } else if (msg.type === "status" || msg.type === "usage") {
     if (msg.type === "status") setStatus(msg.agent, msg.status);
     scheduleSummary();

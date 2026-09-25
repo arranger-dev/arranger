@@ -36,15 +36,16 @@ type Orchestrator struct {
 	Hub   *Hub
 	Root  string // one worktree per agent lives here
 
-	slots   chan struct{} // caps concurrent agent processes
-	mu      sync.Mutex
-	running map[string]context.CancelFunc // agent id -> cancel of its run
+	slots     chan struct{} // caps concurrent agent processes
+	mu        sync.Mutex
+	running   map[string]context.CancelFunc // agent id -> cancel of its run
+	approvals map[string]chan Decision      // manager id -> its run, waiting for the user to decide on its plan
 }
 
 // New returns an orchestrator that runs at most parallel agent processes at once.
 func New(st *store.Store, root string, parallel int) *Orchestrator {
 	return &Orchestrator{Store: st, Hub: NewHub(), Root: root, slots: make(chan struct{}, max(1, parallel)),
-		running: map[string]context.CancelFunc{}}
+		running: map[string]context.CancelFunc{}, approvals: map[string]chan Decision{}}
 }
 
 // Dir is the agent's worktree path (it may not exist yet).

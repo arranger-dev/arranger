@@ -15,7 +15,7 @@ One agent with one huge prompt drifts, forgets, and claims success. A team with 
 - **Checks decide "done", not the agent.** Arranger runs your checks itself after every attempt and sends failures back with the exact output, up to three tries.
 - **Parallel and isolated.** Every agent works in its own git worktree and branch, so agents on the same level run at the same time without touching each other's files. Your branches are never changed until you merge.
 - **Review before anything merges.** Managers read each report's diff and accept it or send it back with feedback.
-- **You stay in control.** Live logs and status for every agent, a diff per agent, remove or promote single changes, revert any checkpoint, token limits per agent, and one-click merge into the branch you pick.
+- **You stay in control.** Approve or edit a manager's plan before its team runs, live logs and status for every agent, a diff per agent, remove or promote single changes, revert any checkpoint, token limits per agent, and one-click merge into the branch you pick.
 
 ## Install
 
@@ -55,6 +55,8 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
    - **Checks:** one shell command per line. All of them must exit 0, e.g. `go test ./...`.
 
 5. **Run.** Press **Run**. A manager plans one subgoal (with its own checks) for each report, runs them in parallel, reviews and merges their work into its own branch, then runs its own checks. Links on the canvas animate while agents hand work down and report back. The **Logs** tab streams what each agent is doing.
+
+   Want to check the plan first? Tick **Let me approve the plan before the team runs** under the manager's goal. The manager then stops after planning and shows you each report's goal and checks: edit them, skip or add reports, send the plan back with feedback, or approve it to start the team.
 
 6. **Iterate.** Not quite right? Select the agent and write what should change in **Request changes**. Ask the top manager and it passes each part to the agents it concerns and re-runs only them; everyone keeps their work, and the changes are reviewed, merged and checked like any run. (**Run** plans again from the goal instead.)
 
