@@ -6,7 +6,7 @@ const PID = document.body.dataset.project;
 const main = $("main"), canvas = $("#canvas"), linksSvg = $("#links");
 const SVG = "http://www.w3.org/2000/svg";
 const MAX_LOG_ROWS = 1000;
-const BUSY = ["starting", "running", "verifying", "planning", "waiting", "reviewing"];
+const BUSY = ["starting", "running", "verifying", "planning", "waiting", "reviewing", "fixing"];
 const NEEDS = ["failed", "blocked"];
 const GAP_X = 240, GAP_Y = 150, PAD = 48, SNAP = 8;
 let dirty = false, selected = null, tab = "goal";
@@ -100,7 +100,7 @@ function layout(all) {
 // "down" while the manager hands out subgoals (planning, or the report is just starting),
 // "up" while the report works for its manager, or the manager reviews what it sent back.
 function linkFlow(mgrStatus, kidStatus) {
-  if (kidStatus === "starting" || mgrStatus === "planning") return { dir: "down", status: kidStatus === "starting" ? kidStatus : mgrStatus };
+  if (kidStatus === "starting" || mgrStatus === "planning" || mgrStatus === "fixing") return { dir: "down", status: kidStatus === "starting" ? kidStatus : mgrStatus };
   if (BUSY.includes(kidStatus)) return { dir: "up", status: kidStatus };
   if (mgrStatus === "reviewing" && kidStatus === "done") return { dir: "up", status: mgrStatus };
   return null;
@@ -145,7 +145,8 @@ function addAgent(role, name, type, x, y, parent) {
     id: slug(role) + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     name, role, runtime: type?.runtime ?? "claude", parent: parent ?? "", color: "",
     x: Math.max(0, Math.round(x / SNAP) * SNAP), y: Math.max(0, Math.round(y / SNAP) * SNAP),
-    defaults: type ? { model: type.model, args: type.args, prompt: type.prompt } : null,
+    defaults: type ? { model: type.model, args: type.args, prompt: type.prompt }
+      : window.ROLES?.[role] ? { prompt: window.ROLES[role] } : null, // a default type starts with its role's instructions
   };
   agents.set(a.id, a);
   makeCard(a);
@@ -184,10 +185,58 @@ main.addEventListener("drop", e => {
   refreshCards();
 });
 
+// linkFrom draws a connection from one of a box's dots, like draw.io. From the bottom dot, the agent
+// it's released over reports to this one; from a side dot, whichever box is higher on the canvas
+// manages (level: the one dropped on reports).
+function linkFrom(e, c) {
+  const src = agents.get(c.dataset.id), draft = document.createElementNS(SVG, "path"), cls = e.target.classList;
+  const side = cls.contains("left") ? -1 : cls.contains("right") ? 1 : 0, down = cls.contains("down");
+  draft.classList.add("draft");
+  canvas.classList.add("linking");
+  c.classList.add("src");
+  e.target.classList.add("on");
+  let over = null;
+  try { e.target.setPointerCapture(e.pointerId); } catch {}
+  const x1 = side ? src.x + (side > 0 ? c.offsetWidth : 0) : src.x + c.offsetWidth / 2;
+  const y1 = side ? src.y + c.offsetHeight / 2 : src.y + c.offsetHeight, dir = 1;
+  // the manager and the report a drop would make, and whether that changes anything without a loop
+  const managesIt = id => side ? agents.get(id).y >= src.y : down;
+  const pair = id => managesIt(id) ? { mgr: src.id, kid: id } : { mgr: id, kid: src.id };
+  const allowed = id => { const { mgr, kid } = pair(id); return agents.get(kid).parent !== mgr && !isUnder(mgr, kid); };
+  e.target.onpointermove = m => {
+    const r = canvas.getBoundingClientRect(), x2 = m.clientX - r.left, y2 = m.clientY - r.top;
+    const bend = Math.max(40, Math.abs((side ? x2 - x1 : y2 - y1)) / 2);
+    draft.setAttribute("d", side
+      ? `M${x1},${y1} C${x1 + side * bend},${y1} ${x2 - side * bend},${y2} ${x2},${y2}`
+      : `M${x1},${y1} C${x1},${y1 + dir * bend} ${x2},${y2 - dir * bend} ${x2},${y2}`);
+    if (!draft.isConnected) linksSvg.append(draft); // a live refresh may have redrawn the links
+    over?.classList.remove("drop");
+    over = document.elementsFromPoint(m.clientX, m.clientY).find(x => x !== c && x.matches?.("#canvas .card"));
+    if (over && !allowed(over.dataset.id)) over = null; // no-ops and loops
+    over?.classList.add("drop");
+  };
+  e.target.onpointerup = e.target.onpointercancel = () => {
+    e.target.onpointermove = e.target.onpointerup = e.target.onpointercancel = null;
+    draft.remove();
+    canvas.classList.remove("linking");
+    c.classList.remove("src");
+    e.target.classList.remove("on");
+    if (!over) return;
+    over.classList.remove("drop");
+    const { mgr, kid: kidId } = pair(over.dataset.id), kid = agents.get(kidId);
+    kid.parent = mgr;
+    paintCard(kid);
+    say(`${kid.name} now reports to ${nameOf(mgr)} · unsaved`);
+    dirty = true;
+    drawLinks();
+  };
+}
+
 // boxes on the canvas: drag to move; release over another box to report to it; click to open
 canvas.addEventListener("pointerdown", e => {
   const c = e.target.closest(".card");
   if (!c || e.button !== 0 || e.target.classList.contains("x")) return;
+  if (e.target.classList.contains("port")) { e.preventDefault(); linkFrom(e, c); return; }
   const a = agents.get(c.dataset.id), sx = e.clientX, sy = e.clientY, ox = a.x, oy = a.y;
   let moved = false, over = null;
   try { c.setPointerCapture(e.pointerId); } catch {} // keeps the drag when the pointer outruns the box
@@ -233,9 +282,12 @@ main.addEventListener("pointerdown", e => {
     main.classList.remove("panning");
   };
 });
-// ask shows the styled confirm dialog and resolves true when the user presses the action button.
-function ask(title, text, action, keep = "Cancel") {
+// ask shows the styled confirm dialog and resolves true when the user presses the action button,
+// which is red unless danger is false.
+function ask(title, text, action, keep = "Cancel", danger = true) {
   const d = $("#confirm-dialog");
+  $("#c-input").hidden = true;
+  $("#c-ok").classList.toggle("danger", danger);
   $("#c-cancel").textContent = keep;
   $("h3", d).textContent = title;
   $("#c-text").textContent = text;
@@ -251,10 +303,11 @@ canvas.addEventListener("click", async e => {
   if (!e.target.classList.contains("x")) return;
   const id = e.target.closest(".card").dataset.id, a = agents.get(id);
   if (BUSY.includes(a.el.dataset.status)) { say(`${a.name} is running; stop it before removing it`, true); return; }
-  const n = kidsOf(id).length;
-  if (!await ask(`Remove ${a.name}?`, n
-    ? `Its ${n === 1 ? "report moves" : `${n} reports move`} up to ${a.parent ? nameOf(a.parent) : "the top level"}.`
-    : "", "Remove")) return;
+  const n = kidsOf(id).length, st = summary.agents[id];
+  const notes = [];
+  if (n) notes.push(`Its ${n === 1 ? "report moves" : `${n} reports move`} up to ${a.parent ? nameOf(a.parent) : "the top level"}.`);
+  if (st?.adds || st?.dels) notes.push(`Its work (+${st.adds} −${st.dels}) and its branch arranger/${id} are deleted when you save. Merge it first if you want to keep it.`);
+  if (!await ask(`Remove ${a.name}?`, notes.join(" "), "Remove")) return;
   if (!agents.has(id)) return; // removed some other way while the dialog was open
   kidsOf(id).forEach(k => k.parent = a.parent); // reports move up a level
   if (selected === id) closeInspector();
@@ -263,11 +316,22 @@ canvas.addEventListener("click", async e => {
   markDirty();
   drawLinks();
 });
-canvas.addEventListener("dblclick", e => {
+// askText is ask with a text field; it resolves to the text, or null when cancelled.
+async function askText(title, value, action) {
+  const done = ask(title, "", action, "Cancel", false), input = $("#c-input");
+  input.hidden = false;
+  input.value = value;
+  input.focus();
+  input.select();
+  return (await done) ? input.value.trim() : null;
+}
+
+canvas.addEventListener("dblclick", async e => {
   const c = e.target.closest(".card");
   const a = c && agents.get(c.dataset.id);
-  const v = a && prompt("Agent name", a.name);
-  if (v?.trim()) { a.name = v.trim(); paintCard(a); markDirty(); }
+  if (!a) return;
+  const v = await askText("Rename agent", a.name, "Rename");
+  if (v && v !== a.name) { a.name = v; paintCard(a); markDirty(); }
 });
 $("#tidy").onclick = () => {
   layout(true);
@@ -342,10 +406,20 @@ tform.onsubmit = async e => {
 
 /* ---------- header: projects, theme, run all, stats ---------- */
 
-$("#project").onchange = e => {
-  if (dirty && !confirm("Discard unsaved changes?")) { e.target.value = PID; return; }
-  location = "/arrange?p=" + encodeURIComponent(e.target.value);
-};
+// switching projects leaves this page; unsaved canvas changes would be lost, so ask first
+$$("#project ul a").forEach(link => link.onclick = async e => {
+  $("#project").open = false;
+  if (link.classList.contains("on")) { e.preventDefault(); return; }
+  if (!dirty) return;
+  e.preventDefault();
+  if (await ask("Discard unsaved changes?", "The canvas has changes you haven't saved. Switching projects throws them away.", "Discard and switch")) {
+    dirty = false; // beforeunload would ask again
+    location = link.href;
+  }
+});
+// open menus close on a click elsewhere or Escape
+document.addEventListener("click", e => $$("details.menu[open], #needs[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }));
+document.addEventListener("keydown", e => { if (e.key === "Escape") $$("details.menu[open], #needs[open]").forEach(d => { d.open = false; d.querySelector("summary").focus(); }); });
 
 const dlg = $("#project-dialog"), pform = $("#project-form");
 let editing = null; // null = creating
@@ -377,6 +451,12 @@ $("#theme").onclick = () => {
 };
 
 $("#run-all").onclick = async () => {
+  const tops = [...agents.values()].filter(a => !parentOf(a.id) && summary.agents[a.id]?.title);
+  if (!tops.length) { say("No top-level agent has a goal yet. Select one and set its goal first.", true); return; }
+  const names = tops.map(a => a.name).join(", ");
+  if (!await ask(`Run all ${tops.length} top-level ${tops.length === 1 ? "agent" : "agents"}?`,
+    `Starts ${names} from ${tops.length === 1 ? "its goal" : "their goals"}. Managers plan for their teams, so every agent below them may run too.` +
+    (dirty ? " Unsaved changes on the canvas are saved first." : ""), "Run all", "Cancel", false)) return;
   try {
     if (dirty) await save();
     const r = await api("POST", `/api/projects/${PID}/run`);
@@ -404,15 +484,15 @@ $("#stats").onclick = async () => {
   const tiles = el("div", "tiles");
   [[`${s.done}/${s.goals}`, "goals done"], [pct(s.firstTry, s.done), "done on the first try"], [s.failed, "failed or blocked"],
    [s.runs, "agent runs"], [fmtDur(s.seconds * 1000), "agent time"], [fmtTok(s.tokens), "tokens"],
-   ["$" + s.cost.toFixed(2), "cost"], [s.done ? "$" + (s.cost / s.done).toFixed(2) : "–", "per finished goal"], [[el("b", "ok", "+" + s.adds), el("b", "bad", "−" + s.dels)], "lines changed"]]
+   [s.done ? fmtTok(Math.round(s.tokens / s.done)) : "–", "tokens per finished goal"], [[el("b", "ok", "+" + s.adds), el("b", "bad", "−" + s.dels)], "lines changed"]]
     .forEach(([v, l]) => { const d = el("div"); d.append(...(Array.isArray(v) ? v : [el("b", "", v)]), el("span", "", l)); tiles.append(d); });
   body.replaceChildren(tiles,
     el("h2", "", "By runtime"),
-    table(["runtime", "agents", "runs", "done", "failed", "time", "tokens", "cost", "$ / done"],
-      s.runtimes.map(r => [r.runtime, r.agents, r.runs, r.done, r.failed, fmtDur(r.seconds * 1000), fmtTok(r.tokens), "$" + r.cost.toFixed(2), r.done ? "$" + (r.cost / r.done).toFixed(2) : "–"])),
+    table(["runtime", "agents", "runs", "done", "failed", "time", "tokens", "tokens / done"],
+      s.runtimes.map(r => [r.runtime, r.agents, r.runs, r.done, r.failed, fmtDur(r.seconds * 1000), fmtTok(r.tokens), r.done ? fmtTok(Math.round(r.tokens / r.done)) : "–"])),
     el("h2", "", "By agent"),
-    table(["agent", "runtime", "status", "attempts", "runs", "time", "tokens", "cost", "lines"],
-      s.agents.map(a => [a.name, a.runtime, a.status, a.attempts, a.runs, fmtDur(a.seconds * 1000), fmtTok(a.tokens), "$" + a.cost.toFixed(2), `+${a.adds} −${a.dels}`])));
+    table(["agent", "runtime", "status", "attempts", "runs", "time", "tokens", "lines"],
+      s.agents.map(a => [a.name, a.runtime, a.status, a.attempts, a.runs, fmtDur(a.seconds * 1000), fmtTok(a.tokens), `+${a.adds} −${a.dels}`])));
 };
 
 /* ---------- inspector ---------- */
@@ -560,9 +640,11 @@ const limitClass = st => st.tokenHard && st.tokens >= st.tokenHard ? "over" : st
 
 // WORKING says what a busy agent is doing, for the banner at the top of its Goal tab.
 const WORKING = { starting: "is starting", running: "is working", verifying: "is running its checks", planning: "is planning for its team",
-                  waiting: "is waiting for its team", reviewing: "is reviewing its team's work" };
+                  waiting: "is waiting for its team", reviewing: "is reviewing its team's work",
+                  fixing: "is working out who fixes its failing checks" };
 
 function renderWorking(st) {
+  if (tab === "logs") renderLogNow();
   const box = $("#g-working"), busy = st && BUSY.includes(st.status);
   box.hidden = !busy;
   if (!busy) return;
@@ -580,9 +662,9 @@ function renderStats() {
   const parts = [el("span", "", st.status)];
   if (BUSY.includes(st.status) && st.since) parts.push(el("span", "", "working " + fmtDur(Date.now() - st.since)));
   const run = el("span", limitClass(st));
-  run.append("this run ", el("b", "", fmtTok(st.tokens) + " tok"), ` · $${st.cost.toFixed(2)}`);
+  run.append("this run ", el("b", "", fmtTok(st.tokens) + " tok"));
   if (st.tokenSoft || st.tokenHard) run.append(` (limits ${st.tokenSoft ? fmtTok(st.tokenSoft) : "–"} / ${st.tokenHard ? fmtTok(st.tokenHard) : "–"})`);
-  parts.push(run, el("span", "", `all time ${fmtTok(st.allTokens)} tok · $${st.allCost.toFixed(2)}`));
+  parts.push(run, el("span", "", `all time ${fmtTok(st.allTokens)} tok`));
   box.replaceChildren(...parts);
 }
 
@@ -689,7 +771,8 @@ $("#r-go").onclick = async e => {
 };
 
 $("#i-clone").onclick = async () => {
-  if (!confirm(`Add a copy of ${nameOf(selected)}? It gets the same settings and manager, but no goal.` + (dirty ? " Unsaved changes on the canvas are saved too." : ""))) return;
+  if (!await ask(`Add a copy of ${nameOf(selected)}?`, "It gets the same settings and manager, but no goal." + (dirty ? " Unsaved changes on the canvas are saved too." : ""),
+    "Add copy", "Cancel", false)) return;
   try {
     const { agent: src } = await api("GET", `/api/agents/${encodeURIComponent(selected)}`);
     const s = agents.get(selected), parent = parentOf(selected) ?? "";
@@ -770,7 +853,7 @@ function drawPlan() {
   const { kind, mgr, items } = planEdit, on = [...items.values()].filter(i => i.on).length;
   const st = summary.agents[mgr];
   $("#pr-title").textContent = kind === "revision" ? `${nameOf(mgr)}'s plan for your change` : `${nameOf(mgr)}'s plan`;
-  $("#pr-sub").textContent = `${on} of ${items.size} reports get work` + (st?.cost ? ` · planning cost $${st.cost.toFixed(2)}` : "") +
+  $("#pr-sub").textContent = `${on} of ${items.size} reports get work` + (st?.tokens ? ` · planning used ${fmtTok(st.tokens)} tokens` : "") +
     ". Nothing runs until you approve.";
   $("#pr-approve").disabled = on === 0;
   $("#pr-approve").title = on ? "" : "Give at least one report work, or cancel.";
@@ -858,49 +941,403 @@ $("#pr-cancel").onclick = async e => {
   decidePlan(btn, { action: "cancel" }, "Cancelling…", `${nameOf(planEdit.mgr)}'s plan was cancelled.`);
 };
 
-/* ---------- logs ---------- */
+/* ---------- logs: one section per run, outcome and reason first ---------- */
 
 const log = $("#log"), logPane = $('[data-pane="logs"]');
 
-function evRow(e) {
-  const row = el("div", "ev");
-  row.dataset.kind = e.kind;
-  row.append(el("span", "t", time(e.ts)), el("span", "k", e.kind), el("span", "x", e.text || "·"));
-  if (e.raw) {
-    row.dataset.raw = "";
-    row.raw = e.raw;
-    if ($("#raw").checked) row.append(el("pre", "", e.raw));
-  }
-  return row;
-}
-log.onclick = e => {
-  const row = e.target.closest(".ev[data-raw]");
-  if (!row) return;
-  const pre = row.querySelector("pre");
-  pre ? pre.remove() : row.append(el("pre", "", row.raw));
+// line icons, drawn like the sidebar's (no emoji)
+const ICONS = {
+  msg: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z",
+  tool: "M4 17l6-5-6-5M12 19h8",
+  file: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M9 15l2 2 4-4",
+  ok: "M20 6 9 17l-5-5",
+  bad: "M18 6 6 18M6 6l12 12",
+  error: "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
+  plan: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
+  verdict: "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM18 9a9 9 0 0 1-9 9",
+  you: "M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z",
+  flag: "M4 22V4M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1",
 };
-$("#raw").onchange = loadLogs;
+function icon(name, cls = "") {
+  const s = document.createElementNS(SVG, "svg"), p = document.createElementNS(SVG, "path");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "li " + cls);
+  s.setAttribute("aria-hidden", "true");
+  p.setAttribute("d", ICONS[name]);
+  s.append(p);
+  return s;
+}
+
+// logState holds the selected agent's log, and how the user is looking at it.
+const logState = { agent: null, events: [], runs: new Map(), open: new Map(), filter: "all", q: "" };
+
+const isTerminalDone = e => e.kind === "done" && /^(all \d+ checks? passed|team work merged)/.test(e.text);
+const isJSON = t => /^\s*\{[\s\S]*\}\s*$/.test(t || "");
+const attemptMsg = e => e.kind === "msg" && /^attempt (\d+)\/(\d+) with /.exec(e.text || "");
+const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+const names = xs => xs.length <= 3 ? xs.join(", ") : `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more`;
+const clock = ts => { const d = new Date(ts); return d.toDateString() === new Date().toDateString() ? time(ts).slice(0, 5) : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time(ts).slice(0, 5); };
+const since = (ts, t0) => { const s = Math.max(0, Math.round((ts - t0) / 1000)); return `+${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+// check parses a check event: "✓ cmd" or "✗ cmd (exit status 1)".
+function check(e) {
+  const ok = e.text.startsWith("✓");
+  let cmd = e.text.slice(2);
+  if (!ok) { const i = cmd.lastIndexOf(" ("); if (i > 0) cmd = cmd.slice(0, i); }
+  return { ok, cmd, out: e.raw || "" };
+}
+// keyLine picks the line of a failure's output that says what went wrong.
+function keyLine(out) {
+  const ls = out.split("\n").map(l => l.trim()).filter(Boolean);
+  return ls.find(l => /error|fail|panic|undefined|exception|expected|not found|cannot|denied|no such/i.test(l) && !/^ok\b/.test(l)) || ls.at(-1) || "";
+}
+const fileOf = e => (e.text || "").replace(/^\S+\s+/, "");
+const fileVerb = e => ({ write: "Wrote", create_file: "Created", delete: "Deleted" })[(e.text || "").split(" ")[0].toLowerCase()] || "Edited";
+
+// sessionsOf splits the events into runs: one per press of Run (or a manager starting this agent).
+// Events from before runs were recorded are split at requests, results and long pauses.
+function sessionsOf(events) {
+  const out = [];
+  let cur = null;
+  const attemptOfRun = new Map();
+  for (const e of events) {
+    const m = attemptMsg(e);
+    if (m) attemptOfRun.set(e.run, +m[1]);
+    const legacy = !e.session;
+    const fresh = !cur || (legacy
+      ? !cur.legacy || e.kind === "request" || cur.ended || e.ts - cur.last > 10 * 60e3
+      : cur.key !== e.session);
+    if (fresh) out.push(cur = { key: legacy ? "L" + e.id : e.session, legacy, events: [], ended: false, first: e.ts });
+    e.att = e.attempt || attemptOfRun.get(e.run) || 0;
+    cur.events.push(e);
+    cur.last = e.ts;
+    if (isTerminalDone(e) || e.kind === "error" && /^(stopped by user|you cancelled the plan|needs you|checks still failing|merged work)/.test(e.text)) cur.ended = true;
+  }
+  return out;
+}
+
+// outcome says how a run ended, in one word and one sentence, with the reason for a failure.
+function outcome(g, latest) {
+  const st = latest ? summary.agents[logState.agent]?.status : null;
+  if (st === "awaiting") return { state: "awaiting", word: "Waiting for you", line: "The plan is ready. Approve it in the Goal tab." };
+  const attempts = Math.max(0, ...g.events.map(e => e.att));
+  const manager = kidsOf(logState.agent).length > 0;
+  if (latest && BUSY.includes(st)) return { state: "running", word: "Working", line: attempts && !manager ? `Working on attempt ${attempts} of 3.` : `${nameOf(logState.agent)} ${WORKING[st] ?? "is working"}.` };
+  for (let i = g.events.length - 1; i >= 0; i--) {
+    const e = g.events[i];
+    if (isTerminalDone(e)) {
+      const n = /all (\d+)/.exec(e.text)?.[1];
+      const checks = +n === 1 ? "its check" : `all ${n} checks`;
+      return { by: e, state: "done", word: "Done", line: e.text.startsWith("team")
+        ? `Done. The team's work is merged and ${checks} passed.`
+        : `Done${attempts > 1 ? ` on attempt ${attempts}` : ""}. ${checks[0].toUpperCase() + checks.slice(1)} passed.` };
+    }
+    if (e.kind !== "error") continue;
+    if (/^stopped by user/.test(e.text)) return { by: e, state: "stopped", word: "Stopped", line: "You stopped it." };
+    if (/^you cancelled the plan/.test(e.text)) return { by: e, state: "stopped", word: "Cancelled", line: "You cancelled the plan." };
+    if (/^the plan wasn't approved/.test(e.text)) return { by: e, state: "stopped", word: "Stopped", line: "The plan wasn't approved in time." };
+    if (/^needs you: /.test(e.text)) return { by: e, state: "blocked", word: "Needs you", line: e.text.replace(/^needs you: /, "").split("\n")[0].replace(/^./, c => c.toUpperCase()) + "." };
+    return { by: e, state: "failed", word: "Failed", line: failureLine(g, attempts, e) };
+  }
+  if (g.events.some(e => e.kind === "merge")) return { state: "other", word: "Merged", line: "" };
+  if (g.events.some(e => /^synced with/.test(e.text))) return { state: "other", word: "Synced", line: "" };
+  return { state: "stopped", word: "Ended", line: "It ended without a result." };
+}
+// failureLine puts the reason first: the check that still fails and its telling line.
+function failureLine(g, attempts, err) {
+  const last = lastChecks(g).filter(c => !c.ok);
+  const head = `Failed${attempts > 1 ? ` after ${attempts} attempts` : ""}`;
+  if (last.length) return [`${head}: `, el("code", "", last[0].cmd), last.length > 1 ? ` and ${plural(last.length - 1, "other check")} still fail.` : " still fails."];
+  return `${head}: ${err.text.split("\n")[0]}`;
+}
+// lastChecks are the checks of the run's last round (worker attempt or manager verify).
+function lastChecks(g) {
+  const cs = g.events.filter(e => e.kind === "check");
+  if (!cs.length) return [];
+  const lastAtt = cs.at(-1).att, round = [];
+  for (let i = cs.length - 1; i >= 0 && cs[i].att === lastAtt; i--) {
+    round.unshift(check(cs[i]));
+    if (i > 0 && cs[i].id - cs[i - 1].id > 1) break; // an earlier round of the same attempt number
+  }
+  return round;
+}
+// activity says what the run did, in one line.
+function activity(g) {
+  const ev = g.events, parts = [];
+  const plans = ev.filter(e => e.kind === "plan" && !/^plan ready/.test(e.text));
+  const verdicts = ev.filter(e => e.kind === "verdict");
+  if (plans.length) parts.push(`Gave work to ${names([...new Set(plans.map(e => e.text.split(" → ")[0]))])}`);
+  const acc = verdicts.filter(e => e.text.startsWith("✓")).map(e => e.text.replace(/^✓ accepted and merged |^✓ /, ""));
+  const rej = verdicts.filter(e => e.text.startsWith("✗")).map(e => e.text.replace(/^✗ rejected /, "").split(":")[0]);
+  if (acc.length) parts.push(`merged ${names(acc)}`);
+  if (rej.length) parts.push(`sent back ${names(rej)}`);
+  const fixes = ev.filter(e => e.kind === "warn" && /fails my checks/.test(e.text)).length;
+  if (fixes) parts.push(`${plural(fixes, "fix round")}`);
+  const files = [...new Set(ev.filter(e => e.kind === "file").map(fileOf))];
+  const cmds = ev.filter(e => e.kind === "tool" && /^bash /i.test(e.text)).length;
+  const reads = ev.filter(e => e.kind === "tool" && !/^bash /i.test(e.text)).length;
+  if (files.length) parts.push(`changed ${names(files)}`);
+  if (cmds) parts.push(`ran ${plural(cmds, "command")}`);
+  if (reads) parts.push(`looked at the code ${plural(reads, "time")}`);
+  const s = parts.join(", ");
+  return s ? s[0].toUpperCase() + s.slice(1) + "." : "";
+}
+
+// category is what a filter chip calls an event.
+function category(e) {
+  switch (e.kind) {
+    case "tool": return "commands";
+    case "file": return "files";
+    case "check": return "checks";
+    case "error": case "warn": case "stderr": return "errors";
+    default: return "messages";
+  }
+}
+// hidden events carry no information for a reader unless they ask for everything.
+const hidden = e => e.kind === "stderr" || e.kind === "usage" || e.kind === "done" && e.text === "finished" ||
+  e.kind === "msg" && (isJSON(e.text) || /^checkpoint [0-9a-f]+$/.test(e.text)) || !!attemptMsg(e);
+
+function matches(e) {
+  if (logState.filter !== "all" && category(e) !== logState.filter) return false;
+  return !logState.q || (e.text || "").toLowerCase().includes(logState.q);
+}
+
+// timeline turns a run's events into readable rows: commands and checks in a row fold together,
+// attempts get a divider that says why they happened, noise is left out.
+function timeline(g, all, decided) {
+  const rows = [], t0 = g.first, filtered = logState.filter !== "all" || logState.q;
+  let att = 0, prevChecks = [], i = 0;
+  // the event that decided the outcome is already the section's first line
+  const ev = g.events.filter(e => (all || !hidden(e) && e !== decided) && matches(e));
+  while (i < ev.length) {
+    const e = ev[i];
+    if (!filtered && e.att > 1 && e.att !== att && g.events.some(x => x.att === e.att - 1)) {
+      const failed = prevChecks.filter(c => !c.ok).map(c => c.cmd);
+      const d = el("li", "ldiv");
+      d.append(el("b", "", `Attempt ${e.att} of 3`), failed.length ? el("span", "", `because ${failed.length === 1 ? "a check" : plural(failed.length, "check")} failed: ${names(failed)}`) : "");
+      rows.push(d);
+    }
+    att = e.att || att;
+    // a run of the same kind folds into one row
+    let j = i;
+    while (j + 1 < ev.length && ["tool", "check"].includes(e.kind) && ev[j + 1].kind === e.kind && ev[j + 1].att === e.att) j++;
+    const group = ev.slice(i, j + 1);
+    if (e.kind === "check") prevChecks = group.map(check);
+    rows.push(row(group, t0));
+    i = j + 1;
+  }
+  return rows;
+}
+
+// toolText is a tool call as a reader wants it: the command itself for the shell, else "Read file".
+const toolText = e => /^bash /i.test(e.text) ? e.text.replace(/^bash /i, "") : e.text;
+
+// inline renders the little markdown agents write: `code`, **bold**, and headings as plain lines.
+function inline(text) {
+  const out = [];
+  for (const part of text.replace(/^#{1,6} /gm, "").split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/)) {
+    if (/^`[^`]+`$/.test(part)) out.push(el("code", "", part.slice(1, -1)));
+    else if (/^\*\*[^*]+\*\*$/.test(part)) out.push(el("b", "", part.slice(2, -2)));
+    else if (part) out.push(part);
+  }
+  return out;
+}
+
+function row(group, t0) {
+  const e = group[0], li = el("li", "lrow"), x = el("div", "lx");
+  let k = e.kind, ic = "msg", cls = "";
+  const t = el("span", "lt", since(e.ts, t0));
+  t.title = new Date(e.ts).toLocaleString();
+  if (e.kind === "tool") {
+    ic = "tool";
+    if (group.length === 1) { x.append(el("code", "", toolText(e))); x.className = "lx one"; x.title = toolText(e); x.onclick = () => x.classList.toggle("one"); }
+    else {
+      const d = el("details"), ul = el("ul");
+      group.forEach(g => ul.append(el("li", "", toolText(g))));
+      const cmds = group.filter(g => /^bash /i.test(g.text)).length;
+      d.append(el("summary", "", cmds === group.length ? `Ran ${group.length} commands` : `Used tools ${group.length} times`), ul);
+      x.append(d);
+    }
+  } else if (e.kind === "check") {
+    const cs = group.map(check), ok = cs.filter(c => c.ok).length;
+    ic = ok === cs.length ? "ok" : "bad"; cls = ic;
+    const d = el("details"), ul = el("ul");
+    cs.forEach(c => ul.append(el("li", "", `${c.ok ? "passed" : "failed"}  ${c.cmd}`)));
+    d.append(el("summary", "", `Checks: ${ok} of ${cs.length} passed`), ul);
+    x.append(d);
+  } else if (e.kind === "file") {
+    ic = "file"; x.append(`${fileVerb(e)} `, el("code", "", fileOf(e)));
+  } else if (e.kind === "plan") {
+    ic = "plan"; cls = "mgr"; x.textContent = e.text.replace(/ \(checks: .*\)$/, "");
+    const checks = / \(checks: (.*)\)$/.exec(e.text)?.[1];
+    if (checks) x.title = "checks: " + checks;
+  } else if (e.kind === "verdict") {
+    ic = e.text.startsWith("✗") ? "bad" : "verdict"; cls = e.text.startsWith("✗") ? "bad" : "mgr";
+    x.textContent = e.text.replace(/^[✓✗] /, "").replace(/^./, c => c.toUpperCase());
+  } else if (e.kind === "request") {
+    ic = "you"; cls = "you"; x.textContent = e.text.replace(/^you /, "You ");
+  } else if (e.kind === "error" || e.kind === "warn" || e.kind === "stderr") {
+    ic = "error"; cls = e.kind === "warn" ? "warn" : "bad"; x.textContent = e.text;
+  } else if (e.kind === "done") {
+    if (isTerminalDone(e)) { ic = "flag"; cls = "ok"; k = "other"; x.textContent = e.text.replace(/^./, c => c.toUpperCase()); }
+    else { k = "answer"; x.append(...inline(e.text)); x.className = "lx clamp"; x.onclick = () => x.classList.toggle("clamp"); }
+  } else if (e.kind === "start") {
+    ic = "flag"; k = "other"; x.append("Started", e.text ? ": " : "", e.text || "");
+  } else if (e.kind === "merge") {
+    ic = "verdict"; cls = "ok"; k = "other"; x.textContent = e.text.replace(/^./, c => c.toUpperCase());
+  } else {
+    x.append(...inline(e.text || ""));
+    if ((e.text || "").length > 280 || (e.text || "").split("\n").length > 4) { x.className = "lx clamp"; x.onclick = () => x.classList.toggle("clamp"); }
+  }
+  if ($("#raw").checked && group.some(g => g.raw)) {
+    const d = el("details"); d.append(el("summary", "", "raw output"), el("pre", "", group.map(g => g.raw).filter(Boolean).join("\n\n")));
+    x.append(d);
+  }
+  li.dataset.k = k;
+  li.append(t, icon(ic, cls), x);
+  return li;
+}
+
+// checklist shows the last round of checks, with a failure's telling line and output right there.
+function checklist(g) {
+  const cs = lastChecks(g);
+  if (!cs.length) return null;
+  const ul = el("ul", "lchk");
+  for (const c of cs) {
+    const li = el("li");
+    li.append(icon(c.ok ? "ok" : "bad", c.ok ? "ok" : "bad"), el("code", "", c.cmd));
+    if (!c.ok && c.out) {
+      li.append(el("div", "lkey", keyLine(c.out)));
+      const d = el("details"); d.append(el("summary", "", "Full output"), el("pre", "", c.out));
+      li.append(d);
+    }
+    ul.append(li);
+  }
+  return ul;
+}
+
+function section(g, latest, all, first) {
+  const d = el("details", "lrun"), o = outcome(g, latest), sum = el("summary");
+  d.dataset.state = o.state;
+  d.open = logState.open.has(g.key) ? logState.open.get(g.key) : first; // the newest run that did something starts open
+  d.ontoggle = () => logState.open.set(g.key, d.open);
+  const runs = new Set(g.events.map(e => e.run).filter(Boolean));
+  let tokens = [...runs].reduce((n, r) => n + (logState.runs.get(r)?.tokens || 0), 0);
+  if (latest && BUSY.includes(summary.agents[logState.agent]?.status)) tokens = Math.max(tokens, summary.agents[logState.agent]?.tokens || 0);
+  const attempts = Math.max(0, ...g.events.map(e => e.att));
+  const meta = [fmtDur((o.state === "running" || o.state === "awaiting" ? Date.now() : g.last) - g.first)];
+  if (attempts > 1) meta.push(plural(attempts, "attempt"));
+  if (tokens) meta.push(fmtTok(tokens) + " tokens");
+  const label = o.state === "other" ? (g.events.some(e => e.kind === "merge") ? "Merge at " : "Sync at ") : "Run at ";
+  sum.append(el("span", "lstate", o.word), el("span", "lwhen", label + clock(g.first)), el("span", "lmeta", meta.join(" · ")));
+  const body = el("div", "lbody");
+  const filtered = logState.filter !== "all" || logState.q;
+  if (!filtered) {
+    const ask = g.events.find(e => e.kind === "request");
+    if (ask) {
+      const p = el("p", "lask"), newPlan = /^you asked for a new plan/.test(ask.text);
+      p.append(el("b", "", newPlan ? "You asked for a new plan: " : "You asked: "),
+        ask.text.replace(/^you asked for (changes: |a new plan( and said: )?)/, "") || "(no note)");
+      body.append(p);
+    }
+    const out = el("p", "lout");
+    Array.isArray(o.line) ? out.append(...o.line) : out.append(o.line);
+    if (o.line) body.append(out);
+    const act = activity(g);
+    if (act) body.append(el("p", "lact", act));
+    const cl = checklist(g);
+    if (cl) body.append(cl);
+  }
+  const rows = timeline(g, all, o.by);
+  if (rows.length) { const ol = el("ol", "ltime"); ol.append(...rows); body.append(ol); }
+  d.append(sum, body);
+  return { d, count: rows.length };
+}
+
+function stoppedRuns(gs) {
+  const d = el("details", "lrun"), sum = el("summary");
+  d.dataset.state = "stopped";
+  sum.append(el("span", "lstate", "Stopped"), el("span", "lwhen", `${gs.length} runs stopped before they did anything`),
+    el("span", "lmeta", `${clock(gs.at(-1).first)} to ${clock(gs[0].first)}`));
+  const body = el("div", "lbody"), ul = el("ul", "lchk");
+  gs.forEach(g => { const li = el("li"); li.append(icon("error"), el("span", "", "Run at " + clock(g.first))); ul.append(li); });
+  body.append(ul);
+  d.append(sum, body);
+  return d;
+}
+
+function renderFilters(events, all) {
+  const counts = { all: 0, messages: 0, commands: 0, files: 0, checks: 0, errors: 0 };
+  for (const e of events) if (all || !hidden(e)) { counts.all++; counts[category(e)]++; }
+  const labels = { all: "All", messages: "Messages", commands: "Commands", files: "Files", checks: "Checks", errors: "Errors" };
+  $("#log-filters").replaceChildren(...Object.keys(labels).filter(k => k === "all" || counts[k]).map(k => {
+    const b = el("button", logState.filter === k ? "on" : "");
+    b.type = "button";
+    b.append(labels[k], el("b", "", counts[k]));
+    b.onclick = () => { logState.filter = k; renderLogs(); };
+    return b;
+  }));
+}
+
+function renderLogs() {
+  if (logState.agent !== selected) return;
+  const all = $("#raw").checked, top = logPane.scrollTop;
+  renderFilters(logState.events, all);
+  const groups = sessionsOf(logState.events).reverse();
+  const filtered = logState.filter !== "all" || logState.q;
+  const st = summary.agents[logState.agent];
+  if (st && (BUSY.includes(st.status) || st.status === "awaiting") && st.since && !(groups[0] && groups[0].first >= st.since - 2000 && !groups[0].legacy))
+    groups.unshift({ key: "now", events: [], first: st.since, last: Date.now() }); // it started, and hasn't logged anything yet
+  const secs = [];
+  for (let i = 0; i < groups.length; i++) {
+    // runs stopped before they did anything fold into one line
+    const idle = g => g.events.length <= 3 && g.events.every(e => e.kind === "request" || e.kind === "start" || e.kind === "error" && /^stopped by user/.test(e.text));
+    let j = i;
+    while (!filtered && j + 1 < groups.length && idle(groups[i]) && idle(groups[j + 1]) && !(i === 0 && BUSY.includes(summary.agents[logState.agent]?.status))) j++;
+    if (j > i) { secs.push({ d: stoppedRuns(groups.slice(i, j + 1)), count: 1 }); i = j; continue; }
+    secs.push(section(groups[i], i === 0, all, !secs.some(s => s.full)));
+    secs.at(-1).full = true;
+  }
+  if (filtered) secs.splice(0, secs.length, ...secs.filter(s => s.count));
+  if (!secs.length) log.replaceChildren(el("div", "empty", logState.events.length ? "Nothing matches." : "No activity yet. Set a goal and press Run."));
+  else log.replaceChildren(...secs.map(s => s.d));
+  logPane.scrollTop = top;
+  renderLogNow();
+}
+
+// renderLogNow pins what the agent is doing right now above its log.
+function renderLogNow() {
+  const st = selected && summary.agents[selected], box = $("#log-now"), busy = st && (BUSY.includes(st.status) || st.status === "awaiting");
+  box.hidden = !busy;
+  if (!busy) return;
+  box.style.setProperty("--s", `var(--${st.status === "awaiting" ? "awaiting" : ["planning", "waiting", "reviewing", "fixing"].includes(st.status) ? "manager" : st.status === "verifying" ? "verifying" : "running"})`);
+  $("#log-now-text").textContent = (st.status === "awaiting" ? "Waiting for you to approve the plan" : `${nameOf(selected)} ${WORKING[st.status] ?? st.status}`) +
+    (st.since ? ` · ${fmtDur(Date.now() - st.since)}` : "") + (st.now ? ` · now: ${st.now}` : "");
+}
 
 async function loadLogs() {
   if (!selected) return;
-  const es = await api("GET", `/api/agents/${selected}/events`).catch(e => (say(e.message, true), []));
-  log.replaceChildren(...es.map(evRow));
-  if (!es.length) log.append(el("div", "empty", "No activity yet. Set a goal and press Run."));
-  logPane.scrollTop = logPane.scrollHeight;
+  const id = selected;
+  const [es, rs] = await Promise.all([
+    api("GET", `/api/agents/${id}/events`).catch(e => (say(e.message, true), [])),
+    api("GET", `/api/agents/${id}/runs`).catch(() => []),
+  ]);
+  if (id !== selected) return;
+  if (logState.agent !== id) Object.assign(logState, { open: new Map(), filter: "all", q: "" }), $("#log-search").value = "";
+  Object.assign(logState, { agent: id, events: es, runs: new Map(rs.map(r => [r.id, r])) });
+  renderLogs();
 }
 
-// Live rows are batched per animation frame and capped, so a chatty agent can't stall the page.
-let pending = [], frame = 0;
+$("#raw").onchange = renderLogs;
+$("#log-search").oninput = e => { logState.q = e.target.value.trim().toLowerCase(); renderLogs(); };
+
+// live events join the log; the view re-renders at most a few times a second
+let logTimer = 0;
 function appendLive(e) {
-  pending.push(e);
-  frame ||= requestAnimationFrame(() => {
-    const atBottom = logPane.scrollTop + logPane.clientHeight >= logPane.scrollHeight - 30;
-    log.querySelector(".empty")?.remove();
-    log.append(...pending.map(evRow));
-    while (log.childElementCount > MAX_LOG_ROWS) log.firstElementChild.remove();
-    if (atBottom) logPane.scrollTop = logPane.scrollHeight;
-    pending = []; frame = 0;
-  });
+  if (logState.agent !== e.agent) return;
+  logState.events.push(e);
+  if (logState.events.length > MAX_LOG_ROWS) logState.events.splice(0, logState.events.length - MAX_LOG_ROWS);
+  logTimer ||= setTimeout(() => { logTimer = 0; renderLogs(); }, 250);
 }
 
 /* ---------- diff: select hunks to remove or promote; revert checkpoints ---------- */
@@ -1037,9 +1474,11 @@ async function loadPreview() {
   if (!mform.elements.target.value) mform.elements.target.value = p.target;
   const st = summary.agents[selected];
   if (st && st.status !== "done") lines.push(el("p", "note", `${nameOf(selected)} isn't done (${st.status}), so this work hasn't passed its checks.`));
+  const something = (p.commits && p.files) || p.uncommitted > 0;
   lines.push(el("span", "", p.commits && p.files
     ? `${p.commits} commit${p.commits > 1 ? "s" : ""} · ${p.files} file${p.files !== 1 ? "s" : ""} · +${p.adds} −${p.dels}`
-    : `Nothing to merge: ${p.target} already has all of this work.`));
+    : something ? "No checkpoints to merge yet." : `Nothing to merge: ${p.target} already has all of this work.`));
+  if (p.uncommitted) lines.push(el("p", "note", `Plus ${p.uncommitted} file${p.uncommitted > 1 ? "s" : ""} changed since the last checkpoint, not counted above. Merging saves ${p.uncommitted > 1 ? "them" : "it"} as a checkpoint first.`));
   if (!p.exists) lines.push(el("span", "", `Creates branch ${p.target} from ${p.start}.`));
   if (p.checkedOut) lines.push(el("p", p.dirty ? "note bad" : "note", p.dirty
     ? `${p.target} is checked out in ${p.checkedOut} with uncommitted changes. Commit or stash them first.`
@@ -1051,7 +1490,7 @@ async function loadPreview() {
   }
   $("#m-ff").disabled = !p.canFF;
   if (!p.canFF && mform.elements.strategy.value === "ff") mform.elements.strategy.value = "merge";
-  $("#m-go").disabled = !p.commits || !p.files || p.dirty || p.conflicts.length > 0;
+  $("#m-go").disabled = !something || p.dirty || p.conflicts.length > 0;
   box.replaceChildren(...lines);
 }
 
@@ -1107,7 +1546,7 @@ function refreshCards() {
     if (st.tokens) {
       const lc = limitClass(st);
       const tok = el("span", lc, (lc ? "⚠ " : "") + fmtTok(st.tokens) + " tok");
-      tok.title = `$${st.cost.toFixed(2)} this run` + (lc === "over" ? " · over the hard limit" : lc === "warn" ? " · over the soft limit" : "");
+      tok.title = "tokens this run" + (lc === "over" ? " · over the hard limit" : lc === "warn" ? " · over the soft limit" : "");
       b.append(tok);
     }
   }
@@ -1124,7 +1563,7 @@ async function refreshSummary() {
   const running = all.filter(([, s]) => BUSY.includes(s.status)).length;
   $("#n-running").textContent = running;
   $("#running").hidden = running === 0;
-  $("#cost").textContent = summary.cost.toFixed(2);
+  $("#tokens").textContent = fmtTok(all.reduce((n, [, s]) => n + (s.allTokens || 0), 0));
   $("#n-needs").textContent = needs.length;
   $("#needs").dataset.n = needs.length;
   $("#needs").dataset.kind = needs.every(([, s]) => s.status === "awaiting") ? "plan" : "fail"; // amber for plans, red for failures
@@ -1175,13 +1614,16 @@ setInterval(() => {
 const es = new EventSource("/api/events?project=" + encodeURIComponent(PID));
 es.onmessage = m => {
   const msg = JSON.parse(m.data);
-  if (msg.type === "hello") {
-    $("#stale").hidden = msg.build === String(window.BUILD); // this page came from an older run of the server
+  if (msg.type === "hello" || msg.type === "resync") {
+    // a (re)connect or missed updates: whatever changed meanwhile never arrived, so reload the state
+    if (msg.type === "hello") $("#stale").hidden = msg.build === String(window.BUILD); // this page came from an older run of the server
+    refreshSummary();
+    if (selected && tab === "logs") loadLogs();
   } else if (msg.type === "event") {
     const e = msg.event;
     if (e.kind !== "stderr") {
       const now = cardOf(e.agent)?.querySelector(".now");
-      if (now) now.textContent = `${e.kind}: ${e.text}`;
+      if (now) now.textContent = `${e.kind === "start" ? "started" : e.kind}: ${e.text}`;
     }
     if (e.agent === selected && tab === "logs") appendLive(e);
     if (e.agent === selected && e.kind !== "stderr") scheduleLiveDiff(); // it edited files, ran a tool, checkpointed...
@@ -1189,11 +1631,14 @@ es.onmessage = m => {
     loadPlan(msg.agent);
   } else if (msg.type === "status" || msg.type === "usage") {
     if (msg.type === "status") setStatus(msg.agent, msg.status);
+    if (msg.type === "status" && msg.agent === selected && tab === "logs") loadLogs(); // its outcome and totals changed
     scheduleSummary();
     if (msg.type === "status" && msg.agent === selected && tab === "diff" && !selectedHunks().length) loadDiff(); // don't wipe a selection in progress
   }
 };
 $("#reload").onclick = () => location.reload();
+// a backstop for anything a live update didn't cover
+setInterval(() => { if (!document.hidden) refreshSummary(); }, 15000);
 
 /* ---------- start ---------- */
 

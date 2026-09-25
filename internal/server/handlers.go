@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"go.uber.org/zap"
+
 	"arranger/internal/agents"
 	"arranger/internal/git"
 	"arranger/internal/orch"
@@ -114,6 +116,16 @@ func (s *Server) saveArrangement(w http.ResponseWriter, r *http.Request) {
 	if err := s.st.SaveArrangement(r.PathValue("id"), as); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
+	}
+	// removed agents take their worktree and branch with them (the page warned about unmerged work)
+	if p, err := s.st.Project(r.PathValue("id")); err == nil && p.Repo != "" {
+		for _, a := range old {
+			if !keep[a.ID] {
+				if err := s.o.Remove(p.Repo, a.ID); err != nil {
+					zap.L().Warn("clean up removed agent", zap.String("agent", a.Name), zap.Error(err))
+				}
+			}
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -264,6 +276,16 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, es)
 }
 
+// runs lists the agent's process calls with their time and tokens, for the Logs tab.
+func (s *Server) runs(w http.ResponseWriter, r *http.Request) {
+	rs, err := s.st.Runs(r.PathValue("id"), 500)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, rs)
+}
+
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
 	sum, err := s.st.Summary(r.PathValue("id"))
 	if err != nil {
@@ -346,6 +368,9 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 			return
 		case b := <-c:
 			fmt.Fprintf(w, "data: %s\n\n", b)
+			if s.o.Hub.Dropped(c) {
+				fmt.Fprint(w, "data: {\"type\":\"resync\"}\n\n") // it missed updates: reload the state
+			}
 			flusher.Flush()
 		}
 	}

@@ -25,6 +25,7 @@ const (
 	maxAttempts     = 3 // worker: first try + 2 retries fed with the failing checks' output
 	maxPlanTries    = 2 // manager: re-ask when the plan/review isn't valid JSON or misses checks
 	maxReviewRounds = 3 // manager: review, re-run rejected children, review again...
+	maxFixRounds    = 2 // manager: pass its failing checks to the team, re-run, check again...
 	maxDiffInReview = 15000
 )
 
@@ -46,6 +47,12 @@ type Orchestrator struct {
 func New(st *store.Store, root string, parallel int) *Orchestrator {
 	return &Orchestrator{Store: st, Hub: NewHub(), Root: root, slots: make(chan struct{}, max(1, parallel)),
 		running: map[string]context.CancelFunc{}, approvals: map[string]chan Decision{}}
+}
+
+// Remove deletes a removed agent's worktree and branch.
+func (o *Orchestrator) Remove(repo, agentID string) error {
+	o.Hub.SetNow(agentID, "")
+	return git.RemoveWorktree(repo, o.Dir(agentID), agentID)
 }
 
 // Dir is the agent's worktree path (it may not exist yet).
@@ -134,18 +141,41 @@ func (o *Orchestrator) Workspace(p store.Project, a store.Agent) (dir, base stri
 		return "", "", err
 	}
 	base = strings.TrimSpace(out)
-	o.Store.SetGoal(a.ID, map[string]any{"base": base})
+	o.Store.SetGoal(a.ID, map[string]any{"base": base, "from_branch": branch})
 	return dir, base, nil
 }
+
+// errMoved means an agent that moved to another manager couldn't bring its work along.
+var errMoved = errors.New("moved to another manager")
 
 // Sync brings the agent's worktree up to date with the branch it works from (see BaseFor) and
 // returns its worktree, its new diff base, and how many commits came in. The agent's diff is
 // measured from the synced tip from then on, so upstream changes don't show as its work.
+//
+// An agent that moved to another manager since it last worked first has its own commits replayed
+// onto its new manager's branch, so it keeps its work but not its old manager's.
 func (o *Orchestrator) Sync(p store.Project, a store.Agent) (dir, base string, n int, err error) {
+	prev, _ := o.Store.Goal(a.ID)
 	if dir, base, err = o.Workspace(p, a); err != nil {
 		return "", "", 0, err
 	}
 	from := BaseFor(p, a)
+	if prev.From != "" && prev.From != from && base == prev.Base {
+		out, err := git.Run(dir, "rev-parse", from)
+		if err != nil {
+			return dir, base, 0, err
+		}
+		tip := strings.TrimSpace(out)
+		if err := git.MoveOnto(dir, tip, base); err != nil {
+			return dir, base, 0, fmt.Errorf("%w: couldn't move %s's work from %s onto %s: %v", errMoved, a.Name, prev.From, from, err)
+		}
+		o.Store.SetGoal(a.ID, map[string]any{"base": tip, "from_branch": from})
+		o.RefreshDiff(a.ID, dir, tip)
+		return dir, tip, 0, nil
+	}
+	if prev.From != from {
+		o.Store.SetGoal(a.ID, map[string]any{"from_branch": from})
+	}
 	if n, err = git.Sync(dir, from); err != nil || n == 0 {
 		return dir, base, 0, err
 	}
@@ -220,7 +250,7 @@ func (o *Orchestrator) start(agentID, change string) error {
 		cancel()
 		return fmt.Errorf("%s is already running", a.Name)
 	}
-	j := &job{o: o, ctx: ctx, p: p, a: a, change: change}
+	j := &job{o: o, ctx: ctx, p: p, a: a, change: change, session: time.Now().UnixMilli()}
 	if change != "" {
 		j.emit("request", "you asked for changes: "+change, "")
 	}
@@ -235,15 +265,19 @@ func (o *Orchestrator) start(agentID, change string) error {
 
 // job is one agent's run: where it works and how it reports.
 type job struct {
-	o   *Orchestrator
-	ctx context.Context
-	p   store.Project
-	a   store.Agent
-	run int64 // current runs.id, tags events
+	o       *Orchestrator
+	ctx     context.Context
+	p       store.Project
+	a       store.Agent
+	run     int64 // current runs.id, tags events
+	session int64 // this run as the user sees it (Run to result), tags events
 
 	// change is what the user asked to change since the last run (or, for a report, the part of
 	// it its manager passed down). "" for a plain run from the goal.
 	change string
+	fix    bool // change is a fix the manager asks for because the team's merged work fails its checks
+
+	allow []string // shell commands the agent may run without asking: a worker's own checks
 
 	used      int  // tokens this run, across attempts
 	warned    bool // soft limit already reported
@@ -251,9 +285,11 @@ type job struct {
 }
 
 func (j *job) emit(kind, text, raw string) {
-	e := store.LogEvent{Agent: j.a.ID, Run: j.run, Kind: kind, Text: text, Raw: raw}
+	e := store.LogEvent{Agent: j.a.ID, Run: j.run, Session: j.session, Kind: kind, Text: text, Raw: raw}
 	j.o.Store.AddEvent(&e)
-	if kind != "stderr" {
+	if kind == "start" {
+		j.o.Hub.SetNow(j.a.ID, "started: "+agents.Clip(text, 80))
+	} else if kind != "stderr" {
 		j.o.Hub.SetNow(j.a.ID, kind+": "+agents.Clip(text, 80))
 	}
 	j.o.Hub.Publish(j.p.ID, map[string]any{"type": "event", "event": e})
@@ -279,6 +315,9 @@ func (j *job) newRun(attempt int) { j.run = j.o.Store.NewRun(j.a.ID, attempt) }
 
 // execute runs an agent's goal and returns its final status. feedback comes from a reviewer.
 func (o *Orchestrator) execute(j *job, feedback string) (status string) {
+	if j.session == 0 { // a report its manager started
+		j.session = time.Now().UnixMilli()
+	}
 	lg := zap.L().With(zap.String("agent", j.a.Name), zap.String("id", j.a.ID), zap.String("runtime", j.a.Runtime))
 	lg.Info("run started", zap.String("project", j.p.Name), zap.Bool("rerun", feedback != ""))
 	start := time.Now()
@@ -290,6 +329,7 @@ func (o *Orchestrator) execute(j *job, feedback string) (status string) {
 	if err != nil {
 		return j.fail("failed", err.Error())
 	}
+	j.emit("start", g.Title, "") // opens this run in the log right away
 	kids, err := o.Store.Children(j.a.ID)
 	if err != nil {
 		return j.fail("failed", err.Error())
@@ -299,6 +339,8 @@ func (o *Orchestrator) execute(j *job, feedback string) (status string) {
 	switch {
 	case dir == "":
 		return j.fail("failed", err.Error())
+	case errors.Is(err, errMoved): // working on anyway would mix two managers' work
+		return j.fail("blocked", "needs you: "+err.Error())
 	case err != nil:
 		j.emit("warn", "couldn't sync with "+BaseFor(j.p, j.a)+", working from where this agent left off: "+err.Error(), "")
 	case n > 0:
@@ -314,12 +356,13 @@ func (o *Orchestrator) execute(j *job, feedback string) (status string) {
 
 func runWorker(j *job, g store.Goal, dir, feedback string) string {
 	checks := lines(g.Checks)
+	j.allow = checks // so it can run its checks itself before it finishes
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		j.status("running", map[string]any{"attempts": attempt})
 		j.newRun(attempt)
 		j.emit("msg", fmt.Sprintf("attempt %d/%d with %s", attempt, maxAttempts, j.a.Runtime), "")
 
-		_, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change), dir)
+		_, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change, j.fix), dir)
 		if sha, err := git.Commit(dir, fmt.Sprintf("arranger: %s attempt %d", j.a.Name, attempt)); err != nil {
 			j.emit("error", err.Error(), "")
 		} else if sha != "" {

@@ -43,7 +43,7 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
    arranger
    ```
 
-   Then open <http://127.0.0.1:7777>.
+   Then open <http://127.0.0.1:7889>.
 
 2. **Point it at a repo.** Click **Settings** in the header and enter the path to a git repository. Leave the base branch blank to use the current branch. The repo needs at least one commit.
 
@@ -62,13 +62,13 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
 
 7. **Review and merge.** Open the **Diff** tab to see every change, remove or promote single hunks, or revert a checkpoint. When you're happy, press **Merge…** to merge the agent's branch into `main` (or any branch, created if needed) as a merge commit, a squash, or a fast-forward.
 
-**Stats** in the header shows cost, tokens, time and first-try success, per agent and per runtime.
+**Stats** (click the token count in the header) shows tokens, time and first-try success, per agent and per runtime.
 
 ## Options
 
 ```text
 arranger [flags]
-  -addr string      listen address (default "127.0.0.1:7777")
+  -addr string      listen address (default "127.0.0.1:7889")
   -data string      data directory (default "~/.arranger")
   -parallel int     max agent processes running at once (default 4)
   -log string       log level: debug, info, warn or error (default "info")

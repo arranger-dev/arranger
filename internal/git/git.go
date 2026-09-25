@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // Run runs git in dir and returns its combined output.
@@ -72,8 +73,14 @@ func BranchExists(repo, branch string) bool {
 	return err == nil
 }
 
+// worktreeMu serializes creating worktrees: reports that start together would otherwise run
+// "git worktree add" in the same repository at once, and git's locks make all but one fail.
+var worktreeMu sync.Mutex
+
 // EnsureWorktree returns the agent's worktree, creating it on branch arranger/<agent> from base.
 func EnsureWorktree(root, repo, base, agentID string) (string, error) {
+	worktreeMu.Lock()
+	defer worktreeMu.Unlock()
 	dir := filepath.Join(root, agentID)
 	if _, err := os.Stat(dir); err == nil {
 		return dir, nil
@@ -86,6 +93,25 @@ func EnsureWorktree(root, repo, base, agentID string) (string, error) {
 	Run(repo, "worktree", "prune")
 	_, err := Run(repo, args...)
 	return dir, err
+}
+
+// RemoveWorktree deletes an agent's worktree and its branch arranger/<agent>, for an agent that was
+// removed. Missing pieces are fine: it may never have run.
+func RemoveWorktree(repo, dir, agentID string) error {
+	if _, err := os.Stat(dir); err == nil {
+		if _, err := Run(repo, "worktree", "remove", "--force", dir); err != nil {
+			if err := os.RemoveAll(dir); err != nil {
+				return err
+			}
+		}
+	}
+	Run(repo, "worktree", "prune")
+	if BranchExists(repo, BranchOf(agentID)) {
+		if _, err := Run(repo, "branch", "-D", BranchOf(agentID)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Commit commits everything in the worktree. Returns "" when there was nothing to commit.
@@ -318,6 +344,24 @@ func MergeBranch(dir, branch, msg string) error {
 	return nil
 }
 
+// MoveOnto replays the worktree's own commits since oldBase onto newBase, for an agent that moved
+// to another manager: it keeps its work and drops the old manager's. A conflicting move is
+// abandoned and the conflicts named.
+func MoveOnto(dir, newBase, oldBase string) error {
+	if _, err := Commit(dir, "arranger: save work before moving"); err != nil {
+		return err
+	}
+	if _, err := Run(dir, append(identity, "rebase", "--onto", newBase, oldBase)...); err != nil {
+		out, _ := Run(dir, "diff", "--name-only", "--diff-filter=U")
+		Run(dir, "rebase", "--abort")
+		if cs := lines(out); len(cs) > 0 {
+			return fmt.Errorf("its work conflicts with %s in %s", newBase, strings.Join(cs, ", "))
+		}
+		return err
+	}
+	return nil
+}
+
 // Behind counts the commits on branch that the worktree at dir doesn't have yet.
 func Behind(dir, branch string) int {
 	out, err := Run(dir, "rev-list", "--count", "HEAD.."+branch)
@@ -388,6 +432,16 @@ type MergePreview struct {
 	Dels       int      `json:"dels"`
 	CanFF      bool     `json:"canFF"`
 	Conflicts  []string `json:"conflicts"`
+	// Uncommitted counts files changed in the source's worktree since its last checkpoint. They
+	// aren't in the numbers above; merging commits them first.
+	Uncommitted int `json:"uncommitted"`
+}
+
+// Uncommitted counts the files changed in the worktree at dir that aren't committed yet, without
+// taking git's optional locks (a preview must not write).
+func Uncommitted(dir string) int {
+	out, _ := Run(dir, "--no-optional-locks", "status", "--porcelain")
+	return len(lines(out))
 }
 
 // PreviewMerge reports what merging source into target would do, without changing anything.

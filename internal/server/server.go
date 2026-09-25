@@ -56,6 +56,7 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("POST /api/agents/{id}/plan", s.decidePlan)
 	mux.HandleFunc("POST /api/agents/{id}/stop", s.stop)
 	mux.HandleFunc("GET /api/agents/{id}/events", s.events)
+	mux.HandleFunc("GET /api/agents/{id}/runs", s.runs)
 	mux.HandleFunc("GET /api/agents/{id}/diff", s.diff)
 	mux.HandleFunc("GET /api/agents/{id}/checkpoints", s.checkpoints)
 	mux.HandleFunc("POST /api/agents/{id}/revert", s.revert)
@@ -124,7 +125,7 @@ func (s *Server) arrange(w http.ResponseWriter, r *http.Request) {
 	}
 	err = s.pages.ExecuteTemplate(w, "arrange.html", map[string]any{
 		"Projects": ps, "Project": cur, "Agents": as, "Runtimes": names, "Installed": installed,
-		"Types": types, "Build": s.build, "Version": version.Get(), "Repo": version.Repo,
+		"Types": types, "Roles": store.RolePrompts, "Build": s.build, "Version": version.Get(), "Repo": version.Repo,
 	})
 	if err != nil {
 		zap.L().Error("render page", zap.Error(err))

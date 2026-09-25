@@ -2,11 +2,14 @@ package orch
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -51,21 +54,42 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 	rt := agents.Runtimes[j.a.Runtime]
 	ctx, cancel := context.WithCancel(j.ctx) // cancelled early when the hard token limit is hit
 	defer cancel()
-	// ponytail: cancel kills the agent process only, not its children; use a process group if strays show up.
-	cmd, err := rt.Command(ctx, j.a.Model, j.a.Args, prompt)
+	cmd, err := rt.Command(ctx, j.a.Model, j.a.Args, prompt, j.allow)
 	if err != nil {
 		return "", err
 	}
 	cmd.Dir = dir
 	cmd.WaitDelay = 5 * time.Second
-	stdout, err := cmd.StdoutPipe()
+	ownGroup(cmd) // stopping it stops everything it started
+	// stdout is a plain pipe handed to the process, so reading ends when the process group is gone,
+	// even if something the agent started in the background inherited it
+	stdout, pw, err := os.Pipe()
 	if err != nil {
 		return "", err
 	}
-	cmd.Stderr = lineWriter(func(l string) { j.emit("stderr", agents.Clip(l, 500), "") })
-	if err := cmd.Start(); err != nil {
+	defer stdout.Close()
+	er, ew, err := os.Pipe()
+	if err != nil {
+		pw.Close()
 		return "", err
 	}
+	cmd.Stdout, cmd.Stderr = pw, ew
+	err = cmd.Start()
+	pw.Close()
+	ew.Close()
+	if err != nil {
+		er.Close()
+		return "", err
+	}
+	stderr := &lineWriter{emit: func(l string) { j.emit("stderr", agents.Clip(l, 500), "") }}
+	stderrDone := make(chan struct{})
+	go func() { io.Copy(stderr, er); er.Close(); stderr.Flush(); close(stderrDone) }()
+	exited := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		killGroup(cmd) // whatever the agent left running (dev servers, watchers) goes with it
+		exited <- err
+	}()
 	started := time.Now()
 	zap.L().Debug("agent process started", zap.String("agent", j.a.Name), zap.String("cmd", cmd.Path), zap.Int("pid", cmd.Process.Pid), zap.String("dir", dir))
 	var cost float64
@@ -136,7 +160,8 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 		}
 	}
 	flush()
-	werr := cmd.Wait()
+	werr := <-exited
+	<-stderrDone
 	j.o.Store.UpdateRun(j.run, cost, in, out, cmd.ProcessState.ExitCode())
 	zap.L().Info("agent process exited", zap.String("agent", j.a.Name), zap.Int("exit", cmd.ProcessState.ExitCode()),
 		zap.Duration("took", time.Since(started)), zap.Int("tokensIn", in), zap.Int("tokensOut", out), zap.Float64("cost", cost))
@@ -157,7 +182,8 @@ func runChecks(j *job, dir string, checks []string) (int, string) {
 		cctx, cancel := context.WithTimeout(j.ctx, 10*time.Minute)
 		cmd := exec.CommandContext(cctx, "sh", "-c", c) // ponytail: needs sh; Windows users need Git Bash on PATH
 		cmd.Dir = dir
-		out, err := cmd.CombinedOutput()
+		ownGroup(cmd) // a timeout or Stop kills everything the check started
+		out, err := combinedOutput(cmd)
 		cancel()
 		tail := string(out)
 		if len(tail) > 2000 {
@@ -175,13 +201,56 @@ func runChecks(j *job, dir string, checks []string) (int, string) {
 	return passed, fb.String()
 }
 
-// lineWriter calls f for each non-empty line written.
-// ponytail: a line split across two writes shows up as two lines.
-type lineWriter func(string)
+// combinedOutput runs cmd and returns its stdout and stderr together. It returns as soon as cmd
+// exits, killing anything it left running in the background (which may hold its output open).
+func combinedOutput(cmd *exec.Cmd) ([]byte, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout, cmd.Stderr = w, w
+	err = cmd.Start()
+	w.Close()
+	if err != nil {
+		r.Close()
+		return nil, err
+	}
+	var out bytes.Buffer
+	read := make(chan struct{})
+	go func() { io.Copy(&out, r); r.Close(); close(read) }()
+	err = cmd.Wait()
+	killGroup(cmd)
+	<-read
+	return out.Bytes(), err
+}
 
-func (f lineWriter) Write(p []byte) (int, error) {
-	for _, l := range lines(string(p)) {
-		f(l)
+// lineWriter calls emit for each non-empty line written. A line split across writes is held
+// until it's complete; Flush emits what's left when the writer is done.
+type lineWriter struct {
+	emit    func(string)
+	mu      sync.Mutex
+	partial []byte
+}
+
+func (w *lineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.partial = append(w.partial, p...)
+	if i := bytes.LastIndexByte(w.partial, '\n'); i >= 0 {
+		for _, l := range lines(string(w.partial[:i])) {
+			w.emit(l)
+		}
+		w.partial = append(w.partial[:0], w.partial[i+1:]...)
 	}
 	return len(p), nil
+}
+
+// Flush emits a last line that never got its newline.
+func (w *lineWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if l := strings.TrimSpace(string(w.partial)); l != "" {
+		w.emit(l)
+	}
+	w.partial = nil
 }

@@ -118,10 +118,61 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 	}
 
 	// 2. run children, review, merge; rejected children re-run with the review feedback
+	if s := j.runTeam(g, dir, team, byID, changes, false); s != "" {
+		return s
+	}
+
+	// 3. verify the merged result against the manager's own goal. When it fails, the manager
+	// passes the failure to the reports it concerns, they fix it, and the result is checked again.
+	checks := lines(g.Checks)
+	for round := 0; ; round++ {
+		j.status("verifying", nil)
+		passed, fbk := runChecks(j, dir, checks)
+		st.SetGoal(j.a.ID, map[string]any{"passed": passed, "total": len(checks)})
+		if j.ctx.Err() != nil {
+			return j.fail("stopped", "stopped by user")
+		}
+		if passed == len(checks) {
+			j.emit("done", fmt.Sprintf("team work merged, all %d checks passed", passed), "")
+			return j.status("done", map[string]any{"feedback": ""})
+		}
+		if round == maxFixRounds {
+			return j.fail("failed", fmt.Sprintf("merged work still fails the manager's checks after %d fix rounds:\n%s", round, fbk))
+		}
+		j.emit("warn", fmt.Sprintf("merged work fails my checks; passing the failure to the team (fix %d/%d)", round+1, maxFixRounds), "")
+		j.status("fixing", nil)
+		j.newRun(1)
+		for _, k := range kids {
+			goals[k.ID], _ = st.Goal(k.ID)
+		}
+		cs, err := j.proposeFix(g, dir, kids, byID, goals, fbk)
+		if j.ctx.Err() != nil {
+			return j.fail("stopped", "stopped by user")
+		}
+		if errors.Is(err, errTokenLimit) {
+			return j.fail("failed", j.limitMsg())
+		}
+		if err != nil {
+			return j.fail("failed", "merged work fails the manager's checks, and it couldn't pass the fix to its team ("+err.Error()+"):\n"+fbk)
+		}
+		fixes := map[string]string{}
+		team := j.applyRevision("fix", cs, byID, goals, fixes)
+		if s := j.runTeam(g, dir, team, byID, fixes, true); s != "" {
+			return s
+		}
+	}
+}
+
+// runTeam runs the given reports in parallel, reviews their work and merges what it accepts;
+// rejected reports re-run with the review's feedback. changes holds each report's part of a
+// requested change (fix: of a fix for the manager's failing checks). It returns "" once all the
+// work is merged, else the manager's final status.
+func (j *job) runTeam(g store.Goal, dir string, team []store.Agent, byID map[string]store.Agent, changes map[string]string, fix bool) string {
+	st := j.o.Store
 	fb := map[string]string{}
 	for round := 1; len(team) > 0; round++ {
 		j.status("waiting", nil)
-		results := runChildren(j, team, fb, changes)
+		results := runChildren(j, team, fb, changes, fix)
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
 		}
@@ -140,7 +191,7 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 
 		j.status("reviewing", nil)
 		j.newRun(round)
-		verdicts, err := j.review(g, dir, done, changes)
+		verdicts, err := j.review(g, dir, done, changes, fix)
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
 		}
@@ -172,19 +223,7 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 		team = again
 	}
 
-	// 3. verify the merged result against the manager's own goal
-	checks := lines(g.Checks)
-	j.status("verifying", nil)
-	passed, fbk := runChecks(j, dir, checks)
-	st.SetGoal(j.a.ID, map[string]any{"passed": passed, "total": len(checks)})
-	if j.ctx.Err() != nil {
-		return j.fail("stopped", "stopped by user")
-	}
-	if passed < len(checks) {
-		return j.fail("failed", "merged work fails the manager's checks:\n"+fbk)
-	}
-	j.emit("done", fmt.Sprintf("team work merged, all %d checks passed", passed), "")
-	return j.status("done", map[string]any{"feedback": ""})
+	return ""
 }
 
 // planDraft and revisionDraft are what a manager proposes, as stored and shown for approval.
@@ -206,7 +245,7 @@ func (j *job) proposePlan(g store.Goal, dir string, kids []store.Agent, byID map
 // apply saves a plan (sgs) or a routed change (cs) to the reports and returns who runs.
 func (j *job) apply(sgs []subgoal, cs []revision, byID map[string]store.Agent, goals map[string]store.Goal, changes map[string]string) []store.Agent {
 	if cs != nil {
-		return j.applyRevision(cs, byID, goals, changes)
+		return j.applyRevision("revision", cs, byID, goals, changes)
 	}
 	return j.applyPlan(sgs, byID)
 }
@@ -233,11 +272,21 @@ func (j *job) proposeRevision(g store.Goal, dir string, kids []store.Agent, byID
 	return rev.Changes, err
 }
 
+// proposeFix asks the manager which reports must fix what, now that their merged work fails its
+// checks. The answer has the same shape as a routed change.
+func (j *job) proposeFix(g store.Goal, dir string, kids []store.Agent, byID map[string]store.Agent, goals map[string]store.Goal,
+	failure string) ([]revision, error) {
+	var rev revisionDraft
+	err := j.decide(fixPrompt(j.a, g, kids, goals, failure), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
+	return rev.Changes, err
+}
+
 // applyRevision gives each concerned report its part of the change. They keep their goals (plus
 // any check that proves the change) and are the only ones re-run.
-func (j *job) applyRevision(cs []revision, byID map[string]store.Agent, goals map[string]store.Goal, changes map[string]string) []store.Agent {
+// kind is how it's recorded: "revision" for a change the user asked for, "fix" for failing checks.
+func (j *job) applyRevision(kind string, cs []revision, byID map[string]store.Agent, goals map[string]store.Goal, changes map[string]string) []store.Agent {
 	st := j.o.Store
-	st.AddDecision(j.a.ID, "revision", revisionDraft{Changes: cs})
+	st.AddDecision(j.a.ID, kind, revisionDraft{Changes: cs})
 	var team []store.Agent
 	for _, c := range cs {
 		kg := goals[c.Agent]
@@ -300,7 +349,7 @@ func validateRevision(cs []revision, team map[string]store.Agent, goals map[stri
 
 // runChildren executes the given children in parallel and returns each one's final status.
 // changes holds each child's part of a change the user asked for, if any.
-func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string) map[string]string {
+func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string, fix bool) map[string]string {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	res := map[string]string{}
@@ -311,7 +360,7 @@ func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string
 			res[k.ID] = "already running"
 			continue
 		}
-		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k, change: changes[k.ID]}
+		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k, change: changes[k.ID], fix: fix && changes[k.ID] != ""}
 		kj.status("starting", nil) // the hand-off shows on the canvas at once, not after the worktree is ready
 		wg.Add(1)
 		go func(k store.Agent) {
@@ -350,7 +399,7 @@ func (j *job) decide(prompt, dir string, v any, valid func() error) error {
 	}
 }
 
-func (j *job) review(g store.Goal, dir string, ids []string, changes map[string]string) (map[string]verdict, error) {
+func (j *job) review(g store.Goal, dir string, ids []string, changes map[string]string, fix bool) (map[string]verdict, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are %s, a manager reviewing your team's work toward: %s\n", j.a.Name, g.Title)
 	b.WriteString("Every item below already passed its checks. Judge the substance: accept only if the change does what its subgoal asks, meets its criteria, and changes nothing unrelated. Where the user asked for a change, accept only if it was made. When you reject, say exactly what to fix.\n")
@@ -361,11 +410,11 @@ func (j *job) review(g store.Goal, dir string, ids []string, changes map[string]
 		if err != nil {
 			return nil, err
 		}
-		if len(d) > maxDiffInReview {
-			d = d[:maxDiffInReview] + "\n… (diff truncated)"
-		}
+		d = reviewDiff(d, id, kg.Base)
 		fmt.Fprintf(&b, "\n=== agent %q (%s)\nsubgoal: %s\ncriteria: %s\n", id, k.Name, kg.Title, kg.Criteria)
-		if c := changes[id]; c != "" {
+		if c := changes[id]; c != "" && fix {
+			fmt.Fprintf(&b, "fix you asked for, because the merged work failed your checks: %s\n", c)
+		} else if c != "" {
 			fmt.Fprintf(&b, "change the user asked for: %s\n", c)
 		}
 		fmt.Fprintf(&b, "diff:\n%s\n", d)
@@ -387,6 +436,56 @@ func (j *job) review(g store.Goal, dir string, ids []string, changes map[string]
 		}
 	}
 	return vs, nil
+}
+
+// reviewDiff fits a report's diff into the review: a list of every file it changed, then whole
+// files' diffs up to maxDiffInReview bytes. Files that don't fit are named, with the command
+// that shows them, so the manager never judges work it can't see.
+func reviewDiff(d, id, base string) string {
+	files := splitDiff(d)
+	var b strings.Builder
+	b.WriteString("files changed:\n")
+	for _, f := range git.ParseDiff(d) {
+		fmt.Fprintf(&b, "  %s (+%d -%d)\n", f.Path, f.Adds, f.Dels)
+	}
+	var left []string
+	size := 0
+	for _, f := range files {
+		if size+len(f) > maxDiffInReview {
+			left = append(left, diffPath(f))
+			continue
+		}
+		size += len(f)
+		b.WriteString(f)
+	}
+	if len(left) > 0 {
+		fmt.Fprintf(&b, "\n(%d file(s) too big to show here: %s. Read them with: git diff %s arranger/%s -- <file>)\n",
+			len(left), strings.Join(left, ", "), base, id)
+	}
+	return b.String()
+}
+
+// splitDiff splits a unified diff into one chunk per file.
+func splitDiff(d string) []string {
+	var files []string
+	for len(d) > 0 {
+		next := strings.Index(d[1:], "\ndiff --git ")
+		if next < 0 {
+			files = append(files, d)
+			break
+		}
+		files = append(files, d[:next+2])
+		d = d[next+2:]
+	}
+	return files
+}
+
+// diffPath is the file a one-file diff chunk is about.
+func diffPath(chunk string) string {
+	if fs := git.ParseDiff(chunk); len(fs) > 0 {
+		return fs[0].Path
+	}
+	return "?"
 }
 
 func validatePlan(sgs []subgoal, team map[string]store.Agent) error {
@@ -412,11 +511,27 @@ func validatePlan(sgs []subgoal, team map[string]store.Agent) error {
 	return nil
 }
 
-// extractJSON decodes the outermost {...} in s, tolerating prose or code fences around it.
+// extractJSON decodes the manager's answer from its reply: the last complete, non-empty JSON object
+// in it. Replies often wrap the answer in prose, code fences or code with braces of their own.
 func extractJSON(s string, v any) error {
-	i, k := strings.Index(s, "{"), strings.LastIndex(s, "}")
-	if i < 0 || k < i {
-		return errors.New("no JSON object in the reply")
+	var objs []json.RawMessage
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(s[i:]))
+		var raw json.RawMessage
+		if dec.Decode(&raw) != nil {
+			continue // prose like "{roughly}", or code
+		}
+		objs = append(objs, raw)
+		i += int(dec.InputOffset()) - 1 // skip what's inside it
 	}
-	return json.Unmarshal([]byte(s[i:k+1]), v)
+	for k := len(objs) - 1; k >= 0; k-- {
+		var keys map[string]json.RawMessage
+		if json.Unmarshal(objs[k], &keys) == nil && len(keys) > 0 { // skips {} from code like map[string]int{}
+			return json.Unmarshal(objs[k], v)
+		}
+	}
+	return errors.New("no JSON object in the reply")
 }

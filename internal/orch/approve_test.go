@@ -52,11 +52,11 @@ esac`}
 func waitPlan(t *testing.T, o *Orchestrator) store.Plan {
 	t.Helper()
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		// the draft is saved just before the status changes, so wait for both
 		if p, err := o.Store.PendingPlan("m"); err == nil && o.Awaiting("m") {
-			if g, _ := o.Store.Goal("m"); g.Status != "awaiting" {
-				t.Fatalf("status while waiting: %q", g.Status)
+			if g, _ := o.Store.Goal("m"); g.Status == "awaiting" {
+				return p
 			}
-			return p
 		}
 	}
 	t.Fatal("no plan to approve")

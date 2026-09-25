@@ -175,3 +175,61 @@ func TestPlanDrafts(t *testing.T) {
 		t.Fatal("plan approval is opt-in")
 	}
 }
+
+// Agents of a default type start with that type's instructions: the demo, and once, existing agents
+// that had none. Instructions the user clears afterwards stay cleared.
+func TestDefaultInstructions(t *testing.T) {
+	s, path := open(t)
+	ps, _ := s.Projects()
+	as, _ := s.Agents(ps[0].ID)
+	if as[0].Prompt != RolePrompts["manager"] || as[2].Prompt != RolePrompts["programmer"] {
+		t.Fatalf("demo instructions: %q / %q", as[0].Prompt, as[2].Prompt)
+	}
+	lead, fe := as[0], as[2]
+	fe.Prompt = ""
+	s.UpdateAgent(fe)
+	s.SQL().Exec(`PRAGMA user_version = 0`) // as before default instructions existed
+	lead.Prompt = "my own"
+	s.UpdateAgent(lead)
+	s.Close()
+
+	reopen := func() []Agent {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		as, _ := s.Agents(ps[0].ID)
+		return as
+	}
+	as = reopen()
+	if as[2].Prompt != RolePrompts["programmer"] || as[0].Prompt != "my own" {
+		t.Fatalf("backfill: programmer %q, lead %q", as[2].Prompt, as[0].Prompt)
+	}
+	s2, _ := Open(path)
+	as[2].Prompt = ""
+	s2.UpdateAgent(as[2])
+	s2.Close()
+	if as := reopen(); as[2].Prompt != "" {
+		t.Fatal("instructions the user cleared must stay cleared")
+	}
+}
+
+// The Coder type is called Programmer now; existing coders are renamed when the store opens.
+func TestCoderBecomesProgrammer(t *testing.T) {
+	s, path := open(t)
+	ps, _ := s.Projects()
+	s.SQL().Exec(`UPDATE agents SET role = 'coder' WHERE role = 'programmer'`) // as before the rename
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	as, _ := s2.Agents(ps[0].ID)
+	for _, a := range as {
+		if a.Role == "coder" {
+			t.Fatalf("%s is still a coder", a.Name)
+		}
+	}
+}

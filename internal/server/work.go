@@ -256,16 +256,17 @@ func (s *Server) merge(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, errors.New("stop "+wk.a.Name+" before merging its work"))
 		return
 	}
-	git.Commit(wk.dir, "arranger: save work before merge") // include anything not yet committed
-	if r.Method == http.MethodGet {
+	if r.Method == http.MethodGet { // a preview only reads: uncommitted work is counted, not committed
 		m, err := git.PreviewMerge(wk.p.Repo, git.BranchOf(wk.a.ID), req.Target, wk.p.Base)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return
 		}
+		m.Uncommitted = git.Uncommitted(wk.dir)
 		writeJSON(w, m)
 		return
 	}
+	git.Commit(wk.dir, "arranger: save work before merge") // include anything not yet committed
 	if req.Message = strings.TrimSpace(req.Message); req.Message == "" {
 		req.Message = wk.g.Title
 	}

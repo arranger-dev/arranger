@@ -50,13 +50,16 @@ var migrations = []string{
 	`ALTER TABLE agents ADD COLUMN token_soft INTEGER NOT NULL DEFAULT 0`, // warn above this many tokens per run; 0 = off
 	`ALTER TABLE agents ADD COLUMN token_hard INTEGER NOT NULL DEFAULT 0`, // stop above this many tokens per run; 0 = off
 	`ALTER TABLE goals ADD COLUMN since INTEGER NOT NULL DEFAULT 0`,       // when the current run started (ms)
+	`ALTER TABLE goals ADD COLUMN from_branch TEXT NOT NULL DEFAULT ''`,   // the branch its work is based on; a change means it moved
 	`ALTER TABLE agents ADD COLUMN color TEXT NOT NULL DEFAULT ''`,        // overrides the role's color; '' = role color
+	`ALTER TABLE events ADD COLUMN session INTEGER NOT NULL DEFAULT 0`,    // which run of the agent it belongs to; 0 = before this existed
 	`ALTER TABLE agents ADD COLUMN x REAL`,                                // canvas position; NULL = lay out automatically
 	`ALTER TABLE agents ADD COLUMN y REAL`,
 	// a crash mid-run leaves stale statuses behind
-	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing', 'awaiting')`,
+	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing', 'awaiting', 'fixing')`,
 	`ALTER TABLE agents ADD COLUMN approve_plan INTEGER NOT NULL DEFAULT 0`, // a manager waits for the user to approve its plan (opt-in)
 	// nobody is waiting on a draft plan after a restart
+	`UPDATE agents SET role = 'programmer' WHERE role = 'coder'`, // the Coder type is now called Programmer
 	`UPDATE plans SET status = 'expired', decided = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE status = 'pending'`,
 }
 
@@ -110,27 +113,29 @@ type Goal struct {
 	Dels     int    `json:"dels"`
 	Base     string `json:"base"`
 	Notes    string `json:"notes"`
+	From     string `json:"from"` // the branch Base came from: its manager's, or the project base
 }
 
 // LogEvent is one line of an agent's activity log.
 type LogEvent struct {
-	ID    int64  `json:"id"`
-	Agent string `json:"agent"`
-	Run   int64  `json:"run"`
-	TS    int64  `json:"ts"`
-	Kind  string `json:"kind"`
-	Text  string `json:"text"`
-	Raw   string `json:"raw,omitempty"`
+	ID      int64  `json:"id"`
+	Agent   string `json:"agent"`
+	Run     int64  `json:"run"`     // the runs row: one agent process call (an attempt, a plan, a review)
+	Session int64  `json:"session"` // the run the user sees: everything from pressing Run to its result; 0 = unknown
+	Attempt int    `json:"attempt"` // the worker attempt Run belongs to, when known (read only)
+	TS      int64  `json:"ts"`
+	Kind    string `json:"kind"`
+	Text    string `json:"text"`
+	Raw     string `json:"raw,omitempty"`
 }
 
 // DemoAgents seed the first project so the arrange screen isn't empty.
 var DemoAgents = []Agent{
 	{ID: "lead", Name: "Lead", Role: "manager"},
 	{ID: "be", Name: "Backend", Role: "manager", Parent: "lead"},
-	{ID: "fe", Name: "Frontend", Role: "coder", Parent: "lead"},
-	{ID: "rev", Name: "Reviewer", Role: "reviewer", Parent: "lead"},
-	{ID: "api", Name: "API Coder", Role: "coder", Parent: "be"},
-	{ID: "db", Name: "DB Coder", Role: "coder", Parent: "be"},
+	{ID: "fe", Name: "Frontend", Role: "programmer", Parent: "lead"},
+	{ID: "api", Name: "API Programmer", Role: "programmer", Parent: "be"},
+	{ID: "db", Name: "DB Programmer", Role: "programmer", Parent: "be"},
 	{ID: "test", Name: "Tester", Role: "tester", Parent: "be"},
 }
 
@@ -152,6 +157,15 @@ func Open(path string) (*Store, error) {
 	for _, m := range migrations {
 		db.Exec(m)
 	}
+	// once: agents of a default type that have no instructions get their type's defaults
+	var v int
+	db.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v < 1 {
+		for role, prompt := range RolePrompts {
+			db.Exec(`UPDATE agents SET prompt = ? WHERE role = ? AND trim(prompt) = ''`, prompt, role)
+		}
+		db.Exec(`PRAGMA user_version = 1`)
+	}
 	s := &Store{db: db}
 	var n int
 	db.QueryRow(`SELECT count(*) FROM projects`).Scan(&n)
@@ -164,6 +178,7 @@ func Open(path string) (*Store, error) {
 	}
 	as := make([]Agent, len(DemoAgents))
 	for i, a := range DemoAgents {
+		a.Prompt = RolePrompts[a.Role]
 		a.ID = p.ID + "-" + a.ID
 		if a.Parent != "" {
 			a.Parent = p.ID + "-" + a.Parent
@@ -309,8 +324,10 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 		if _, err := tx.Exec(`DELETE FROM agents WHERE id=?`, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM goals WHERE agent_id=?`, id); err != nil {
-			return err
+		for _, table := range []string{"goals", "runs", "events", "decisions", "plans"} {
+			if _, err := tx.Exec(`DELETE FROM `+table+` WHERE agent_id=?`, id); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -318,8 +335,8 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 
 // Goal returns an agent's goal; an agent without one gets an empty, idle goal.
 func (s *Store) Goal(agentID string) (g Goal, err error) {
-	err = s.db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes FROM goals WHERE agent_id=?`, agentID).
-		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes)
+	err = s.db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes, from_branch FROM goals WHERE agent_id=?`, agentID).
+		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes, &g.From)
 	if err == sql.ErrNoRows {
 		return Goal{Status: "idle"}, nil
 	}
@@ -347,7 +364,7 @@ func (s *Store) SetGoal(agentID string, kv map[string]any) {
 // AddEvent appends to the log, filling in the event's id and timestamp.
 func (s *Store) AddEvent(e *LogEvent) {
 	e.TS = time.Now().UnixMilli()
-	res, err := s.db.Exec(`INSERT INTO events(run_id, agent_id, ts, kind, text, raw) VALUES(?,?,?,?,?,?)`, e.Run, e.Agent, e.TS, e.Kind, e.Text, e.Raw)
+	res, err := s.db.Exec(`INSERT INTO events(run_id, session, agent_id, ts, kind, text, raw) VALUES(?,?,?,?,?,?,?)`, e.Run, e.Session, e.Agent, e.TS, e.Kind, e.Text, e.Raw)
 	if err != nil {
 		log.Printf("AddEvent: %v", err)
 		return
@@ -357,7 +374,8 @@ func (s *Store) AddEvent(e *LogEvent) {
 
 // Events returns the last limit events for an agent, oldest first.
 func (s *Store) Events(agentID string, limit int) ([]LogEvent, error) {
-	rows, err := s.db.Query(`SELECT * FROM (SELECT id, run_id, ts, kind, text, raw FROM events WHERE agent_id=? ORDER BY id DESC LIMIT ?) ORDER BY id`, agentID, limit)
+	rows, err := s.db.Query(`SELECT e.id, e.run_id, e.session, coalesce(r.attempt, 0), e.ts, e.kind, e.text, e.raw FROM
+		(SELECT * FROM events WHERE agent_id=? ORDER BY id DESC LIMIT ?) e LEFT JOIN runs r ON r.id = e.run_id ORDER BY e.id`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -365,12 +383,39 @@ func (s *Store) Events(agentID string, limit int) ([]LogEvent, error) {
 	es := []LogEvent{}
 	for rows.Next() {
 		e := LogEvent{Agent: agentID}
-		if err := rows.Scan(&e.ID, &e.Run, &e.TS, &e.Kind, &e.Text, &e.Raw); err != nil {
+		if err := rows.Scan(&e.ID, &e.Run, &e.Session, &e.Attempt, &e.TS, &e.Kind, &e.Text, &e.Raw); err != nil {
 			return nil, err
 		}
 		es = append(es, e)
 	}
 	return es, rows.Err()
+}
+
+// RunUsage is one agent process call's time and tokens, for the Logs tab.
+type RunUsage struct {
+	ID      int64 `json:"id"`
+	Attempt int   `json:"attempt"`
+	Started int64 `json:"started"`
+	Ended   int64 `json:"ended"`
+	Tokens  int   `json:"tokens"`
+}
+
+// Runs lists an agent's last limit process calls, oldest first.
+func (s *Store) Runs(agentID string, limit int) ([]RunUsage, error) {
+	rows, err := s.db.Query(`SELECT * FROM (SELECT id, attempt, started, ended, tok_in + tok_out FROM runs WHERE agent_id=? ORDER BY id DESC LIMIT ?) ORDER BY id`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rs := []RunUsage{}
+	for rows.Next() {
+		var r RunUsage
+		if err := rows.Scan(&r.ID, &r.Attempt, &r.Started, &r.Ended, &r.Tokens); err != nil {
+			return nil, err
+		}
+		rs = append(rs, r)
+	}
+	return rs, rows.Err()
 }
 
 // AddDecision records a manager's plan or review verdicts.

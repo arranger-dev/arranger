@@ -1,6 +1,8 @@
 package orch
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -393,5 +395,284 @@ func TestValidateRevision(t *testing.T) {
 		if validateRevision(cs, team, goals) == nil {
 			t.Errorf("%s: expected an error", name)
 		}
+	}
+}
+
+// When the team's merged work fails the manager's own checks, the manager passes the failure to the
+// report it concerns, which fixes it; the merged result then passes. Reports it doesn't name don't re-run.
+func TestManagerFixesFailingChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name, check, status string
+		runsA               int
+	}{
+		{"fixed", "grep -q fixed a.txt", "done", 2},
+		{"gives up", "false", "failed", 1 + maxFixRounds},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := setup(t)
+			plain := func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} }
+			agents.Runtimes["fixmgr"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+				return []string{"-c", `p=$(cat)
+case "$p" in
+*"your own checks fail on the merged result"*) echo '{"changes":[{"agent":"a","change":"write fixed into a.txt"}]}' ;;
+*"YOUR TEAM:"*) echo '{"subgoals":[{"agent":"a","title":"write a","checks":["test -f a.txt"]},{"agent":"b","title":"write b","checks":["test -f b.txt"]}]}' ;;
+*) echo '{"verdicts":[]}' ;;
+esac`}
+			}}
+			agents.Runtimes["fixworker"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+				return []string{"-c", `p=$(cat)
+case "$p" in
+*"ITS CHECKS FAIL"*"write fixed into a.txt"*) echo fixed > a.txt ;;
+*"You are Alpha"*) echo a > a.txt ;;
+*) echo b > b.txt ;;
+esac`}
+			}}
+			defer delete(agents.Runtimes, "fixmgr")
+			defer delete(agents.Runtimes, "fixworker")
+
+			repo := newRepo(t)
+			p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
+			o.Store.SaveArrangement(p.ID, []store.Agent{
+				{ID: "m", Name: "Lead", Role: "manager", Runtime: "fixmgr"},
+				{ID: "a", Name: "Alpha", Role: "coder", Parent: "m", Runtime: "fixworker"},
+				{ID: "b", Name: "Beta", Role: "coder", Parent: "m", Runtime: "fixworker"},
+			})
+			o.Store.SaveGoal("m", store.Goal{Title: "both files", Checks: tc.check})
+			if err := o.Start("m"); err != nil {
+				t.Fatal(err)
+			}
+			g := waitDone(t, o, "m")
+			if g.Status != tc.status {
+				es, _ := o.Store.Events("m", 60)
+				eb, _ := o.Store.Events("b", 60)
+				t.Fatalf("manager: %+v\nevents: %+v\nbeta: %+v", g, es, eb)
+			}
+			var runsA, runsB, fixes int
+			o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id='a'`).Scan(&runsA)
+			o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id='b'`).Scan(&runsB)
+			o.Store.SQL().QueryRow(`SELECT count(*) FROM decisions WHERE agent_id='m' AND kind='fix'`).Scan(&fixes)
+			if runsA != tc.runsA || runsB != 1 || fixes != tc.runsA-1 {
+				t.Fatalf("runs a=%d b=%d, fix rounds %d", runsA, runsB, fixes)
+			}
+			if tc.status == "done" {
+				if out, _ := git.Run(repo, "show", "arranger/m:a.txt"); strings.TrimSpace(out) != "fixed" {
+					t.Fatalf("the fix should be merged into the manager: a.txt = %q", out)
+				}
+			} else if !strings.Contains(g.Feedback, fmt.Sprintf("after %d fix rounds", maxFixRounds)) {
+				t.Fatalf("feedback: %q", g.Feedback)
+			}
+		})
+	}
+}
+
+// alive reports whether the process whose pid is in file is still running.
+func alive(t *testing.T, file string) bool {
+	t.Helper()
+	var b []byte
+	for deadline := time.Now().Add(5 * time.Second); len(strings.TrimSpace(string(b))) == 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no pid in %s", file)
+		}
+		b, _ = os.ReadFile(file)
+	}
+	return exec.Command("kill", "-0", strings.TrimSpace(string(b))).Run() == nil
+}
+
+// A check that leaves a process running in the background still finishes, and the process is killed.
+func TestCheckWithBackgroundProcess(t *testing.T) {
+	o := setup(t)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	j := &job{o: o, ctx: context.Background(), a: store.Agent{ID: "w", Name: "W"}}
+	start := time.Now()
+	passed, fb := runChecks(j, t.TempDir(), []string{"sleep 30 & echo $! > " + pidFile + "; echo started"})
+	if passed != 1 {
+		t.Fatalf("the check itself passed: %s", fb)
+	}
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("the check waited for its background process")
+	}
+	for deadline := time.Now().Add(3 * time.Second); alive(t, pidFile); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the background process outlived its check")
+		}
+	}
+}
+
+// Whatever an agent starts goes away with it: when it's stopped, and when it exits on its own.
+func TestAgentProcessGroup(t *testing.T) {
+	for _, stop := range []bool{true, false} {
+		o := setup(t)
+		pidFile := filepath.Join(t.TempDir(), "pid")
+		script := "cat >/dev/null; sleep 300 & echo $! > " + pidFile + "; echo started; "
+		if stop {
+			script += "sleep 300"
+		}
+		agents.Runtimes["spawner"] = agents.Runtime{Bin: "sh", Parse: func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} },
+			Args: func(string) []string { return []string{"-c", script} }}
+		p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: newRepo(t), Base: "main"})
+		o.Store.SaveArrangement(p.ID, []store.Agent{{ID: "w", Name: "W", Role: "coder", Runtime: "spawner"}})
+		o.Store.SaveGoal("w", store.Goal{Title: "spawn", Checks: "true"})
+		start := time.Now()
+		if err := o.Start("w"); err != nil {
+			t.Fatal(err)
+		}
+		if stop {
+			alive(t, pidFile) // wait until it's up
+			o.Stop("w")
+		}
+		g := waitDone(t, o, "w")
+		if want := map[bool]string{true: "stopped", false: "done"}[stop]; g.Status != want {
+			t.Fatalf("stop=%v: status %q", stop, g.Status)
+		}
+		if time.Since(start) > 15*time.Second {
+			t.Fatalf("stop=%v: the run waited on the background process", stop)
+		}
+		for deadline := time.Now().Add(3 * time.Second); alive(t, pidFile); time.Sleep(50 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("stop=%v: the agent's background process is still running", stop)
+			}
+		}
+		delete(agents.Runtimes, "spawner")
+	}
+}
+
+// Stderr lines that arrive in pieces come out whole.
+func TestLineWriter(t *testing.T) {
+	var got []string
+	w := &lineWriter{emit: func(l string) { got = append(got, l) }}
+	w.Write([]byte("hel"))
+	w.Write([]byte("lo wor"))
+	w.Write([]byte("ld\nsecond\nthi"))
+	w.Write([]byte("rd"))
+	w.Flush()
+	if strings.Join(got, "|") != "hello world|second|third" {
+		t.Fatalf("lines: %q", got)
+	}
+}
+
+// A manager's reply often has prose or code with braces around the JSON; the plan is still found.
+func TestExtractJSONAmongBraces(t *testing.T) {
+	for name, reply := range map[string]string{
+		"brace in prose":   "I'll split it {roughly} in two:\n{\"subgoals\":[{\"agent\":\"a\",\"title\":\"x\",\"checks\":[\"true\"]}]}",
+		"code before":      "The handler is `func h() { return }`. Plan:\n```json\n{\"subgoals\":[{\"agent\":\"a\",\"title\":\"x\",\"checks\":[\"true\"]}]}\n```\nDone {ok}.",
+		"brace after":      "{\"subgoals\":[{\"agent\":\"a\",\"title\":\"x\",\"checks\":[\"true\"]}]}\nNote: map[string]int{} is fine.",
+		"draft then final": "First try: {\"subgoals\":[]}\nBetter:\n{\"subgoals\":[{\"agent\":\"a\",\"title\":\"x\",\"checks\":[\"true\"]}]}",
+	} {
+		var v struct{ Subgoals []subgoal }
+		if err := extractJSON(reply, &v); err != nil || len(v.Subgoals) != 1 || v.Subgoals[0].Title != "x" {
+			t.Errorf("%s: %v %+v", name, err, v)
+		}
+	}
+	var v struct{ Subgoals []subgoal }
+	if extractJSON("no json here {at all}", &v) == nil {
+		t.Error("a reply without a JSON object should be an error")
+	}
+}
+
+// A big change is never cut mid-file for review: every file is listed, whole files are shown up to
+// the limit, and the rest are named with the command that shows them.
+func TestReviewDiff(t *testing.T) {
+	small := "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-x\n+y\n"
+	big := "diff --git a/big.go b/big.go\n--- a/big.go\n+++ b/big.go\n@@ -0,0 +1,1 @@\n+" + strings.Repeat("z", maxDiffInReview) + "\n"
+	got := reviewDiff(small+big, "w", "abc123")
+	for _, want := range []string{"a.go (+1 -1)", "big.go (+1 -0)", "+y", "1 file(s) too big to show here: big.go", "git diff abc123 arranger/w -- <file>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%.400s", want, got)
+		}
+	}
+	if strings.Contains(got, "zzzz") {
+		t.Error("the file that doesn't fit shouldn't be half shown")
+	}
+	if got := reviewDiff(small, "w", "b"); strings.Contains(got, "too big") || !strings.Contains(got, "+y") {
+		t.Errorf("a small diff is shown whole: %s", got)
+	}
+}
+
+// An agent moved to another manager keeps its own work and drops its old manager's, instead of
+// showing the old manager's work as its own.
+func TestMoveToAnotherManager(t *testing.T) {
+	o := setup(t)
+	repo := newRepo(t)
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
+	arrange := func(parent string) {
+		o.Store.SaveArrangement(p.ID, []store.Agent{
+			{ID: "m1", Name: "M1", Role: "manager"}, {ID: "m2", Name: "M2", Role: "manager"},
+			{ID: "c", Name: "C", Role: "coder", Parent: parent},
+		})
+	}
+	arrange("m1")
+	agent := func(id string) store.Agent { a, _, _ := o.Store.Agent(id); return a }
+	work := func(id, file string) {
+		dir, _, _, err := o.Sync(p, agent(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(dir, file), []byte(id+"\n"), 0o644)
+		if _, err := git.Commit(dir, id+" work"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	work("m1", "m1.txt")
+	work("m2", "m2.txt")
+	work("c", "c.txt") // under M1: has m1.txt too
+
+	arrange("m2")
+	dir, base, _, err := o.Sync(p, agent("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, _ := git.Diff(dir, base)
+	if len(fs) != 1 || fs[0].Path != "c.txt" {
+		t.Fatalf("after the move its diff should be only its own work: %+v", fs)
+	}
+	for file, want := range map[string]bool{"c.txt": true, "m2.txt": true, "m1.txt": false} {
+		if _, err := os.Stat(filepath.Join(dir, file)); (err == nil) != want {
+			t.Errorf("%s present=%v, want %v", file, err == nil, want)
+		}
+	}
+	if g, _ := o.Store.Goal("c"); g.From != "arranger/m2" {
+		t.Fatalf("from: %q", g.From)
+	}
+}
+
+// A page too slow for the live updates is told it missed some, once.
+func TestHubReportsDrops(t *testing.T) {
+	h := NewHub()
+	c := h.Subscribe("p")
+	if h.Dropped(c) {
+		t.Fatal("nothing dropped yet")
+	}
+	for range cap(c) + 5 {
+		h.Publish("p", map[string]any{"type": "status"})
+	}
+	if !h.Dropped(c) || h.Dropped(c) {
+		t.Fatal("drops should be reported exactly once")
+	}
+}
+
+// Everything one run logs shares a session, attempts included, so the Logs tab can show it as
+// one run; the next run gets a new one.
+func TestEventsGroupedByRun(t *testing.T) {
+	o := setup(t)
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: newRepo(t), Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{{ID: "w", Name: "W", Role: "programmer", Runtime: "generic", Args: "true"}})
+	o.Store.SaveGoal("w", store.Goal{Title: "t", Checks: "test -f nope"}) // fails, so it retries
+	for range 2 {
+		if err := o.Start("w"); err != nil {
+			t.Fatal(err)
+		}
+		waitDone(t, o, "w")
+	}
+	es, _ := o.Store.Events("w", 500)
+	sessions, attempts := map[int64]bool{}, map[int]bool{}
+	for _, e := range es {
+		if e.Session == 0 {
+			t.Fatalf("event without a session: %+v", e)
+		}
+		sessions[e.Session] = true
+		attempts[e.Attempt] = true
+	}
+	if len(sessions) != 2 || !attempts[1] || !attempts[3] {
+		t.Fatalf("sessions %v, attempts %v", sessions, attempts)
 	}
 }

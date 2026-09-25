@@ -112,7 +112,7 @@ func TestPages(t *testing.T) {
 		t.Fatalf("/: %d → %q", w.Code, w.Header().Get("Location"))
 	}
 	page := a.must(200, "GET", "/arrange?p="+a.pid, "")
-	if !strings.Contains(page, `rel="icon"`) || !strings.Contains(page, "API Coder") {
+	if !strings.Contains(page, `rel="icon"`) || !strings.Contains(page, "API Programmer") {
 		t.Fatal("arrange page should carry the favicon and the demo agents")
 	}
 	if v := version.Get(); !strings.Contains(page, `id="version"`) || !strings.Contains(page, v.Version) {
@@ -549,5 +549,63 @@ func TestPlanApprovalAPI(t *testing.T) {
 	}
 	if g, _ := a.st.Goal("k"); g.Title != "do it now" || g.Status != "done" {
 		t.Fatalf("report runs the approved goal: %+v", g)
+	}
+}
+
+// Removing an agent removes its worktree, its branch in the user's repo, and its history.
+func TestRemovedAgentIsCleanedUp(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"},{"id":"s","name":"Stay","role":"coder"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"t","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/run", "")
+	for deadline := time.Now().Add(20 * time.Second); a.o.IsRunning("k"); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("run never finished")
+		}
+	}
+	if !git.BranchExists(repo, "arranger/k") {
+		t.Fatal("the run should have made a branch")
+	}
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"s","name":"Stay","role":"coder"}]`)
+	if _, err := os.Stat(a.o.Dir("k")); err == nil {
+		t.Error("worktree still there")
+	}
+	if git.BranchExists(repo, "arranger/k") {
+		t.Error("branch still there")
+	}
+	var rows int
+	a.st.SQL().QueryRow(`SELECT (SELECT count(*) FROM runs WHERE agent_id='k') + (SELECT count(*) FROM events WHERE agent_id='k')`).Scan(&rows)
+	if rows != 0 {
+		t.Errorf("%d history rows left", rows)
+	}
+}
+
+// Opening the merge preview doesn't change the agent's work; merging includes what wasn't committed.
+func TestMergePreviewOnlyReads(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"t","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/run", "")
+	for a.o.IsRunning("k") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	os.WriteFile(filepath.Join(a.o.Dir("k"), "late.txt"), []byte("late\n"), 0o644) // changed after its last checkpoint
+	head, _ := git.Run(a.o.Dir("k"), "rev-parse", "HEAD")
+	var m git.MergePreview
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/merge?target=out", "")), &m)
+	if after, _ := git.Run(a.o.Dir("k"), "rev-parse", "HEAD"); after != head || m.Uncommitted != 1 {
+		t.Fatalf("preview committed (%v) or missed the uncommitted file: %+v", after != head, m)
+	}
+	a.must(200, "POST", "/api/agents/k/merge", `{"target":"out","strategy":"merge"}`)
+	if _, err := git.Run(repo, "cat-file", "-e", "out:late.txt"); err != nil {
+		t.Fatal("merging should include the uncommitted file")
 	}
 }

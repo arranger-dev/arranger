@@ -11,7 +11,7 @@
 :root {
   --bg: #f4f5f8; --grid: #0b0d140b; --panel: #fff; --sunk: #f0f1f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
   --accent: #3d6fe0; --on-accent: #fff; --drop: #3d6fe01f;
-  --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
+  --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44; --writer: #0e8fa0; --pm: #c2418f;
   --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079; --awaiting: #d9730d;
   --add-bg: #e6f4ea; --del-bg: #fdecec; --link: #8b919c;
   font: 14px/1.4 var(--sans);
@@ -19,9 +19,10 @@
 [data-theme=dark] {
   --bg: #0e0f12; --grid: #c0caf509; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
   --accent: #7aa2f7; --on-accent: #0e0f12; --drop: #7aa2f733;
-  --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a;
+  --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a; --writer: #7dcfff; --pm: #f5a3cf;
   --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98; --awaiting: #ff9e64;
   --add-bg: #1f2d22; --del-bg: #331f24; --link: #6b7280;
+  --card: #1d2027; --card-line: #3a3f4b; --card-shadow: 0 1px 0 #ffffff08 inset, 0 2px 8px #0006;
 }
 * { box-sizing: border-box; border-radius: 0; }
 body { margin: 0; color: var(--text); background: var(--bg); display: grid; grid-template: auto 1fr / 180px 1fr auto; height: 100vh; overflow: hidden; }
@@ -45,7 +46,22 @@ header button.icon { width: 30px; padding: 5px 0; text-align: center; color: var
 header button.icon:hover { color: var(--text); }
 header .proj { display: flex; }
 header .proj > * + * { margin-left: -1px; }
-header .proj select { max-width: 200px; }
+.menu { position: relative; }
+.menu > summary { list-style: none; display: flex; align-items: center; gap: 8px; height: 100%; padding: 5px 10px 5px 12px; border: 1px solid var(--line);
+  background: var(--panel); cursor: pointer; user-select: none; font-weight: 600; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu > summary span { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu > summary svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s; }
+.menu[open] > summary svg { transform: rotate(180deg); }
+.menu > summary:hover { border-color: var(--muted); }
+.menu ul { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 240px; max-height: 360px; overflow: auto; margin: 0; padding: 4px 0;
+  list-style: none; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 8px 24px #0003; }
+.menu li.head { padding: 6px 12px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.menu li a { display: flex; align-items: center; gap: 8px; padding: 7px 12px; color: var(--text); text-decoration: none; }
+.menu li a::before { content: ""; width: 14px; flex: none; }
+.menu li a.on { font-weight: 600; }
+.menu li a.on::before { content: "✓"; color: var(--accent); }
+.menu li a:hover, .menu li a:focus-visible { background: var(--sunk); outline: none; }
 header h1 { font: 600 14px var(--mono); margin: 0 8px 0 0; }
 header h1 a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 8px; }
 header h1 img { width: 22px; height: 22px; display: block; }
@@ -89,6 +105,15 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 #links { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
 #links path { fill: none; stroke: var(--link); stroke-width: 2.5; stroke-dasharray: 2 7; stroke-linecap: round; }
 /* live links: up toward the manager while a report works for it, down while the manager hands out work */
+#links path.draft { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 5; animation: none; }
+#canvas .card .port { position: absolute; left: 50%; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50%; z-index: 3;
+  background: var(--panel); border: 2px solid var(--c, var(--accent)); opacity: 0; cursor: crosshair; transition: opacity .12s, transform .12s; }
+#canvas .card .port.down { bottom: -7px; }
+#canvas .card .port.left, #canvas .card .port.right { top: 50%; margin: -6.5px 0 0; }
+#canvas .card .port.left { left: -7px; } #canvas .card .port.right { left: auto; right: -7px; }
+#canvas .card:hover .port, #canvas.linking .card.src .port.on { opacity: 1; }
+#canvas .card .port:hover, #canvas.linking .card.src .port.on { transform: scale(1.25); }
+#canvas.linking, #canvas.linking .card { cursor: crosshair; }
 #links path.flow { stroke: var(--s); stroke-width: 3.5; animation: flow .7s linear infinite; }
 #links path.flow.down { animation-direction: reverse; }
 @keyframes flow { to { stroke-dashoffset: 18; } }
@@ -96,7 +121,7 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 #canvas .card.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 6px 18px #0002; }
 #tidy { position: sticky; float: right; top: 12px; right: 12px; margin: 12px; z-index: 4; }
 
-.card { position: relative; display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--panel); border: 1px solid var(--line);
+.card { position: relative; display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--card, var(--panel)); border: 1px solid var(--card-line, var(--line)); box-shadow: var(--card-shadow, none);
   border-left: 3px solid var(--c, var(--accent)); padding: 10px 14px; cursor: grab; user-select: none; width: 210px; }
 .card:hover { border-color: var(--muted); border-left-color: var(--c); }
 .card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -127,16 +152,18 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 @keyframes pulse { to { opacity: .3; } }
 [data-status=starting], [data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
 [data-status=failed], [data-status=blocked] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
-[data-status=planning], [data-status=waiting], [data-status=reviewing] { --s: var(--manager); }
+[data-status=planning], [data-status=waiting], [data-status=reviewing], [data-status=fixing] { --s: var(--manager); }
 [data-status=awaiting] { --s: var(--awaiting); }
 .card[data-status=awaiting] { border-color: var(--s); border-left-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s) 22%, transparent); }
 .card[data-status=awaiting] .st::before, .st[data-status=awaiting]::before { animation: pulse 1s infinite alternate; }
 .card.proposed .now { font-style: italic; opacity: .75; }
 .card.left-out { opacity: .45; }
 .ok { color: var(--done); } .bad { color: var(--failed); }
-[data-role=manager] { --c: var(--manager); } [data-role=coder] { --c: var(--coder); }
+[data-role=manager] { --c: var(--manager); } [data-role=programmer], [data-role=coder] { --c: var(--coder); }
 [data-role=reviewer] { --c: var(--reviewer); } [data-role=tester] { --c: var(--tester); }
+[data-role=writer] { --c: var(--writer); } [data-role=product-manager] { --c: var(--pm); }
 aside .card { display: grid; width: 100%; margin-bottom: 8px; }
+aside .card .name { white-space: normal; overflow: visible; line-height: 1.25; }
 
 
 #inspector { width: var(--iw, min(560px, 45vw)); min-width: 320px; max-width: 85vw; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; position: relative; }
@@ -161,18 +188,64 @@ body.resizing { cursor: col-resize; user-select: none; }
 .row { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
 .feedback { white-space: pre-wrap; background: var(--del-bg); border: 1px solid var(--line); padding: 8px; max-height: 200px; overflow: auto; }
 
-#log { font: 12px/1.5 var(--mono); padding-top: 8px; }
-#log .ev { display: grid; grid-template-columns: 64px 48px 1fr; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--sunk); cursor: default; }
-#log .ev[data-raw] { cursor: pointer; }
-#log .t { color: var(--muted); }
-#log .k { color: var(--muted); }
-#log .x { white-space: pre-wrap; word-break: break-word; }
-#log .ev[data-kind=error] .x, #log .ev[data-kind=error] .k { color: var(--failed); }
-#log .ev[data-kind=done] .k, #log .ev[data-kind=file] .k { color: var(--done); }
-#log .ev[data-kind=tool] .k { color: var(--accent); }
-#log .ev[data-kind=stderr] .x { color: var(--muted); }
-#log pre { grid-column: 1 / -1; margin: 4px 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all; }
 
+/* logs: one section per run, outcome first */
+#log-now { display: flex; align-items: center; gap: 2px; margin: 12px 0 0; padding: 7px 10px; border: 1px solid var(--s); border-left-width: 3px;
+  background: color-mix(in srgb, var(--s) 8%, var(--panel)); font-size: 13px; }
+#log-now[hidden] { display: none; }
+#log-now-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 4px; }
+.lchips { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; }
+.lchips button { padding: 3px 9px; font-size: 12px; color: var(--muted); }
+.lchips button b { font-weight: 600; color: var(--text); margin-left: 4px; }
+.lchips button.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+#log-search { width: 130px; padding: 4px 8px; font-size: 12px; }
+.lbar .check { font-size: 12px; color: var(--muted); }
+#log { padding: 4px 0 20px; }
+#log .empty { color: var(--muted); font-size: 13px; padding: 16px 0; }
+.lrun { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; }
+.lrun > summary { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; list-style: none; font-size: 13px; }
+.lrun > summary::-webkit-details-marker { display: none; }
+.lrun > summary::before { content: ""; width: 6px; height: 6px; flex: none; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform .12s; }
+.lrun[open] > summary::before { transform: rotate(45deg); }
+.lrun .lstate { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: var(--s); }
+.lrun .lstate::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--s); }
+.lrun[data-state=running] .lstate::before, .lrun[data-state=awaiting] .lstate::before { animation: pulse 1s infinite alternate; }
+.lrun .lwhen { color: var(--text); }
+.lrun .lmeta { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
+.lrun[data-state=done] { --s: var(--done); } .lrun[data-state=failed], .lrun[data-state=blocked] { --s: var(--failed); }
+.lrun[data-state=stopped], .lrun[data-state=other] { --s: var(--stopped); } .lrun[data-state=running] { --s: var(--running); }
+.lrun[data-state=awaiting] { --s: var(--awaiting); }
+.lbody { padding: 0 12px 12px; border-top: 1px solid var(--sunk); }
+.lask { margin: 10px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--sunk); font-size: 13px; }
+.lask b { color: var(--muted); font-weight: 400; }
+.lout { margin: 10px 0 0; font-size: 14px; font-weight: 600; color: var(--s); line-height: 1.4; }
+.lout code, .lchk code { font: 12px var(--mono); }
+.lact { margin: 4px 0 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
+.lchk { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; }
+.lchk > li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; align-items: start; font-size: 13px; }
+.lchk > li > code { min-width: 0; white-space: pre-wrap; word-break: break-all; }
+.lchk .lkey { grid-column: 2; font: 12px var(--mono); color: var(--failed); white-space: pre-wrap; word-break: break-word; }
+.lchk details { grid-column: 2; font-size: 12px; color: var(--muted); }
+.lchk summary { cursor: pointer; }
+.ltime { list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px dashed var(--line); padding-top: 8px; display: grid; gap: 2px; }
+.lrow { display: grid; grid-template-columns: 44px 16px 1fr; gap: 6px; align-items: start; padding: 3px 0; font-size: 13px; line-height: 1.45; }
+.lrow .lt { font: 11px/1.9 var(--mono); color: var(--muted); text-align: right; }
+.lrow .lx { min-width: 0; white-space: pre-wrap; word-break: break-word; }
+.lrow .lx code { font: 12px var(--mono); }
+.lrow .lx.one { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.lrow .lx.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.lrow details summary { cursor: pointer; color: var(--text); }
+.lrow details ul { margin: 4px 0 0; padding-left: 16px; font: 12px/1.6 var(--mono); color: var(--muted); }
+.lrow[data-k=error] .lx { color: var(--failed); } .lrow[data-k=warn] .lx { color: var(--verifying); }
+.lrow[data-k=msg] .lx, .lrow[data-k=answer] .lx { color: var(--text); }
+.lrow[data-k=tool] .lx, .lrow[data-k=file] .lx, .lrow[data-k=check] .lx, .lrow[data-k=other] .lx { color: var(--muted); }
+.lrow pre, .lchk pre { margin: 6px 0 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 280px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; }
+.ldiv { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; font-size: 12px; color: var(--muted); }
+.ldiv b { color: var(--text); font-weight: 600; white-space: nowrap; }
+.ldiv::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+svg.li { width: 14px; height: 14px; margin-top: 3px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
+svg.li.ok { color: var(--done); } svg.li.bad { color: var(--failed); } svg.li.mgr { color: var(--manager); } svg.li.you { color: var(--accent); } svg.li.warn { color: var(--verifying); }
 #diff-stat.live::after { content: " · live"; color: var(--running); font-weight: 600; }
 #diff-stat.live:empty::after { content: "live"; }
 .file { border: 1px solid var(--line); margin-top: 10px; }
@@ -204,12 +277,13 @@ body.resizing { cursor: col-resize; user-select: none; }
 .radios small { color: var(--muted); }
 #m-preview { font-size: 13px; margin-top: 12px; display: grid; gap: 6px; }
 #m-preview ul { margin: 0; padding-left: 18px; font: 12px var(--mono); }
-#log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
-#log .ev[data-kind=request] .k, #log .ev[data-kind=request] .x { color: var(--accent); font-weight: 600; }
 /* the way to iterate once an agent has run: say what should change, re-run only what it concerns */
 #g-working { display: flex; align-items: center; gap: 2px; margin-top: 14px; padding: 8px 12px; border: 1px solid var(--s); border-left-width: 3px;
   background: color-mix(in srgb, var(--s) 8%, var(--panel)); font-weight: 600; }
 #g-working[hidden] { display: none; }
+.help { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; font-size: 12px; line-height: 1.35; color: var(--muted); }
+.help li { display: flex; gap: 8px; align-items: flex-start; }
+.help svg { width: 14px; height: 14px; flex: none; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 label.check { display: flex; gap: 6px; align-items: center; font-weight: 400; color: var(--text); }
 label.check input { width: auto; margin: 0; }
 #g-approve-row { margin-top: 10px; }
@@ -257,22 +331,29 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <span class="meta"><span class="st"></span><span class="role"></span> · <span class="rt"></span></span>
     <span class="now"></span>
     <span class="badges"></span>
+    <span class="port down" title="Drag onto another agent to make it report to this one"></span>
+    <span class="port left" title="Drag onto another agent to connect them; the higher box manages"></span>
+    <span class="port right" title="Drag onto another agent to connect them; the higher box manages"></span>
   </div>
 </template>
 
 <header>
   <h1><a href="/arrange"><img src="/arranger.png" alt="">arranger</a></h1>
   <div class="proj">
-    <select id="project" aria-label="Project">
-      {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
-    </select>
-    <button id="edit-project" class="icon" title="Project settings" aria-label="Project settings">⚙</button>
+    <details id="project" class="menu">
+      <summary aria-label="Switch project"><span>{{.Project.Name}}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></summary>
+      <ul>
+        <li class="head">Projects</li>
+        {{range .Projects}}<li><a href="/arrange?p={{.ID}}"{{if eq .ID $.Project.ID}} class="on" aria-current="page"{{end}}>{{.Name}}</a></li>{{end}}
+      </ul>
+    </details>
     <button id="new-project" class="icon" title="New project" aria-label="New project">+</button>
+    <button id="edit-project" class="icon" title="Project settings" aria-label="Project settings">⚙</button>
   </div>
   <div id="bar">
     <span id="running" hidden><span class="live"></span><b id="n-running">0</b> running</span>
     <details id="needs" data-n="0"><summary><span class="dot"></span>Needs you (<b id="n-needs">0</b>)</summary><ul></ul></details>
-    <button id="stats" title="Stats: cost, time and success across the project">$<b id="cost">0.00</b></button>
+    <button id="stats" title="Stats: tokens, time and success across the project"><b id="tokens">0</b> tokens</button>
   </div>
   <span class="sp"></span>
   <span id="msg"></span>
@@ -284,12 +365,19 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 <aside id="palette">
   <h2>Agent types</h2>
   <div class="card" draggable="true" data-role="manager" data-new><span class="name">Manager</span><span class="meta">manager</span></div>
-  <div class="card" draggable="true" data-role="coder" data-new><span class="name">Coder</span><span class="meta">coder</span></div>
-  <div class="card" draggable="true" data-role="reviewer" data-new><span class="name">Reviewer</span><span class="meta">reviewer</span></div>
+  <div class="card" draggable="true" data-role="product-manager" data-new><span class="name">Product Manager</span><span class="meta">product-manager</span></div>
+  <div class="card" draggable="true" data-role="programmer" data-new><span class="name">Programmer</span><span class="meta">programmer</span></div>
   <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
+  <div class="card" draggable="true" data-role="writer" data-new><span class="name">Technical Content Writer</span><span class="meta">writer</span></div>
   <div id="custom-types"></div>
   <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
-  <p class="hint">Drag a type onto the canvas to add an agent, or onto an agent to put it under that agent. Drag boxes to move them, or empty space to pan; drop one on another to change who it reports to. Double-click to rename.</p>
+  <ul class="help">
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Drag a type onto the canvas to add an agent</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v7a4 4 0 0 0 4 4h12M15 10l5 5-5 5"/></svg><span>Drop it on an agent to put it under that agent</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3v12a4 4 0 0 1-4 4H4M8 15l-4 4 4 4M17 3l-4 4M17 3l4 4"/></svg><span>Drop a box on another to change its manager</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v8M12 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM12 16a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"/></svg><span>Drag a box's dots to another agent to connect them</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg><span>Double-click a box to rename it</span></li>
+  </ul>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
   <span class="grow"></span>
   {{with .Version}}<p class="about" id="version" title="{{.String}}{{if .Commit}}&#10;commit {{.Commit}}{{end}}">
@@ -353,7 +441,12 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <p class="status" id="g-msg" role="status"></p>
   </form>
   <div class="pane" data-pane="logs" hidden>
-    <div class="row"><label style="margin:0;display:flex;gap:6px;align-items:center;width:auto"><input type="checkbox" id="raw" style="width:auto"> show raw output</label></div>
+    <div id="log-now" hidden><span class="st busy" id="log-now-dot"></span><span id="log-now-text"></span></div>
+    <div class="lbar">
+      <div class="lchips" id="log-filters" role="toolbar" aria-label="Show"></div>
+      <input id="log-search" type="search" placeholder="Search" aria-label="Search the log">
+      <label class="check" title="Also show raw tool output, stderr and internal messages"><input type="checkbox" id="raw"> Everything</label>
+    </div>
     <div id="log"></div>
   </div>
   <div class="pane" data-pane="diff" hidden>
@@ -440,6 +533,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <form method="dialog">
     <h3></h3>
     <p class="hint" id="c-text"></p>
+    <input id="c-input" hidden maxlength="60" aria-label="Name">
     <div class="row"><button class="primary danger" value="ok" id="c-ok"></button><button value="cancel" id="c-cancel"></button></div>
   </form>
 </dialog>
@@ -453,7 +547,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 
 <div id="stale" hidden>Arranger was restarted with new code. <button id="reload">Reload page</button></div>
 
-<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.AGENTS = {{.Agents}}; window.BUILD = {{.Build}};</script>
+<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.ROLES = {{.Roles}}; window.AGENTS = {{.Agents}}; window.BUILD = {{.Build}};</script>
 <script src="/app.js"></script>
 </body>
 </html>
