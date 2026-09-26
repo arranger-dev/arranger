@@ -124,7 +124,20 @@ function drawLinks() {
       path.dataset.status = flow.status;
       path.classList.add("flow", flow.dir);
     }
-    paths.push(path);
+    // hovering the line shows an x at its middle; clicking it removes the connection
+    const g = document.createElementNS(SVG, "g"), hit = path.cloneNode(), cut = document.createElementNS(SVG, "g");
+    g.setAttribute("class", "link");
+    hit.setAttribute("class", "hit");
+    cut.setAttribute("class", "cut");
+    cut.setAttribute("transform", `translate(${(x1 + x2) / 2},${(y1 + y2) / 2})`);
+    const ring = document.createElementNS(SVG, "circle"), x = document.createElementNS(SVG, "path"), tip = document.createElementNS(SVG, "title");
+    ring.setAttribute("r", 9);
+    x.setAttribute("d", "M-3.5,-3.5 L3.5,3.5 M3.5,-3.5 L-3.5,3.5");
+    tip.textContent = `Remove: ${a.name} stops reporting to ${p.name}`;
+    cut.append(tip, ring, x);
+    cut.addEventListener("click", () => unlink(a.id));
+    g.append(hit, path, cut);
+    paths.push(g);
   }
   linksSvg.replaceChildren(...paths);
   // room to spread out: the canvas always reaches well past the last box and the viewport
@@ -184,6 +197,18 @@ main.addEventListener("drop", e => {
   markDirty();
   refreshCards();
 });
+
+// unlink removes the connection above an agent: it no longer reports to anyone.
+function unlink(id) {
+  const a = agents.get(id), was = parentOf(id);
+  if (!a || !was) return;
+  a.parent = "";
+  paintCard(a);
+  drawLinks();
+  say(`${a.name} no longer reports to ${nameOf(was)} · unsaved`);
+  dirty = true;
+  if (selected === id) fillParents(id);
+}
 
 // linkFrom draws a connection from one of a box's dots, like draw.io. From the bottom dot, the agent
 // it's released over reports to this one; from a side dot, whichever box is higher on the canvas
@@ -272,7 +297,7 @@ canvas.addEventListener("pointerdown", e => {
 });
 // empty space: drag to pan, like draw.io
 main.addEventListener("pointerdown", e => {
-  if (e.button !== 0 || e.target.closest(".card, button")) return;
+  if (e.button !== 0 || e.target.closest(".card, button, #links .link")) return;
   const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
   try { main.setPointerCapture(e.pointerId); } catch {}
   main.classList.add("panning");
@@ -299,9 +324,10 @@ function ask(title, text, action, keep = "Cancel", danger = true) {
   return new Promise(r => d.addEventListener("close", () => r(d.returnValue === "ok"), { once: true }));
 }
 
-canvas.addEventListener("click", async e => {
-  if (!e.target.classList.contains("x")) return;
-  const id = e.target.closest(".card").dataset.id, a = agents.get(id);
+// removeAgent takes an agent off the canvas after the user confirms; its reports move up a level.
+async function removeAgent(id) {
+  const a = agents.get(id);
+  if (!a) return;
   if (BUSY.includes(a.el.dataset.status)) { say(`${a.name} is running; stop it before removing it`, true); return; }
   const n = kidsOf(id).length, st = summary.agents[id];
   const notes = [];
@@ -315,6 +341,17 @@ canvas.addEventListener("click", async e => {
   agents.delete(id);
   markDirty();
   drawLinks();
+}
+canvas.addEventListener("click", e => {
+  if (e.target.classList.contains("x")) removeAgent(e.target.closest(".card").dataset.id);
+});
+// Backspace or Delete removes the selected agent, unless the user is typing or a dialog is open
+document.addEventListener("keydown", e => {
+  if (e.key !== "Backspace" && e.key !== "Delete" || !selected || e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t.closest?.("input, textarea, select, [contenteditable], dialog") || document.querySelector("dialog[open]")) return;
+  e.preventDefault();
+  removeAgent(selected);
 });
 // askText is ask with a text field; it resolves to the text, or null when cancelled.
 async function askText(title, value, action) {
@@ -528,6 +565,38 @@ function fillParents(id) {
   sel.replaceChildren(new Option("nobody (top level)", ""));
   for (const a of agents.values()) if (a.id !== id && !isUnder(a.id, id)) sel.append(new Option(a.name, a.id));
   sel.value = parentOf(id) ?? "";
+  drawPick(sel);
+}
+
+// drawPick shows a native select as the app's own dropdown: the select stays (hidden) as the value,
+// and choosing an option sets it and fires its change event, so existing handlers keep working.
+function drawPick(sel) {
+  let menu = sel.nextElementSibling;
+  if (!menu?.classList.contains("pick")) {
+    menu = el("details", "menu pick");
+    menu.append(el("summary"), el("ul"));
+    sel.after(menu);
+    sel.hidden = true;
+  }
+  const cur = sel.selectedOptions[0];
+  const sum = menu.querySelector("summary");
+  sum.replaceChildren(el("span", "", cur?.text ?? ""), (() => {
+    const s = document.createElementNS(SVG, "svg"), p = document.createElementNS(SVG, "path");
+    s.setAttribute("viewBox", "0 0 24 24"); p.setAttribute("d", "M6 9l6 6 6-6"); s.append(p); return s;
+  })());
+  menu.querySelector("ul").replaceChildren(...[...sel.options].map(o => {
+    const li = el("li"), b = el("button", o.selected ? "on" : "", o.text);
+    b.type = "button";
+    b.onclick = () => {
+      menu.open = false;
+      if (sel.value === o.value) return;
+      sel.value = o.value;
+      drawPick(sel);
+      sel.dispatchEvent(new Event("change"));
+    };
+    li.append(b);
+    return li;
+  }));
 }
 
 $("#i-dir").onclick = async e => {
