@@ -1,6 +1,7 @@
 package git
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -312,5 +313,22 @@ func TestDiffShowsUncommittedNewFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "pkg", "deep.go")); !os.IsNotExist(err) {
 		t.Fatal("removing the hunk should delete the new file")
+	}
+}
+
+// Reports that start together create their worktrees at the same moment; none may fail.
+func TestEnsureWorktreeConcurrently(t *testing.T) {
+	repo, root := newRepo(t), t.TempDir()
+	errs := make(chan error, 8)
+	for i := range 8 {
+		go func() {
+			_, err := EnsureWorktree(root, repo, "main", fmt.Sprintf("a%d", i))
+			errs <- err
+		}()
+	}
+	for range 8 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -142,3 +142,119 @@ func TestTypes(t *testing.T) {
 		t.Fatal("type not deleted")
 	}
 }
+
+// Only one decision lands on a draft, and a restart expires drafts nobody is waiting on anymore.
+func TestPlanDrafts(t *testing.T) {
+	s, path := open(t)
+	id, err := s.SavePlan("m", "plan", map[string]any{"subgoals": []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := s.PendingPlan("m"); err != nil || p.ID != id || p.Kind != "plan" {
+		t.Fatalf("pending: %+v %v", p, err)
+	}
+	if !s.DecidePlan(id, "replanned", "smaller", nil) || s.DecidePlan(id, "approved", "", nil) {
+		t.Fatal("exactly the first decision should land")
+	}
+	if _, err := s.PendingPlan("m"); err == nil {
+		t.Fatal("a decided draft isn't pending")
+	}
+	id2, _ := s.SavePlan("m", "plan", map[string]any{})
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	var status string
+	s2.SQL().QueryRow(`SELECT status FROM plans WHERE id=?`, id2).Scan(&status)
+	if status != "expired" {
+		t.Fatalf("draft after restart: %q", status)
+	}
+	if as, _ := s2.Agents(func() string { ps, _ := s2.Projects(); return ps[0].ID }()); as[0].ApprovePlan {
+		t.Fatal("plan approval is opt-in")
+	}
+}
+
+// Agents of a default type start with that type's instructions: the demo, and once, existing agents
+// that had none. Instructions the user clears afterwards stay cleared.
+func TestDefaultInstructions(t *testing.T) {
+	s, path := open(t)
+	ps, _ := s.Projects()
+	as, _ := s.Agents(ps[0].ID)
+	if as[0].Prompt != RolePrompts["manager"] || as[2].Prompt != RolePrompts["programmer"] {
+		t.Fatalf("demo instructions: %q / %q", as[0].Prompt, as[2].Prompt)
+	}
+	lead, fe := as[0], as[2]
+	fe.Prompt = ""
+	s.UpdateAgent(fe)
+	s.SQL().Exec(`PRAGMA user_version = 0`) // as before default instructions existed
+	lead.Prompt = "my own"
+	s.UpdateAgent(lead)
+	s.Close()
+
+	reopen := func() []Agent {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		as, _ := s.Agents(ps[0].ID)
+		return as
+	}
+	as = reopen()
+	if as[2].Prompt != RolePrompts["programmer"] || as[0].Prompt != "my own" {
+		t.Fatalf("backfill: programmer %q, lead %q", as[2].Prompt, as[0].Prompt)
+	}
+	s2, _ := Open(path)
+	as[2].Prompt = ""
+	s2.UpdateAgent(as[2])
+	s2.Close()
+	if as := reopen(); as[2].Prompt != "" {
+		t.Fatal("instructions the user cleared must stay cleared")
+	}
+}
+
+// The Coder type is called Programmer now; existing coders are renamed when the store opens.
+func TestCoderBecomesProgrammer(t *testing.T) {
+	s, path := open(t)
+	ps, _ := s.Projects()
+	s.SQL().Exec(`UPDATE agents SET role = 'coder' WHERE role = 'programmer'`) // as before the rename
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	as, _ := s2.Agents(ps[0].ID)
+	for _, a := range as {
+		if a.Role == "coder" {
+			t.Fatalf("%s is still a coder", a.Name)
+		}
+	}
+}
+
+// A top-level agent's single goal from before goal lists becomes the first goal in its list, once;
+// a report's goal stays its own.
+func TestGoalBecomesFirstInList(t *testing.T) {
+	s, path := open(t)
+	ps, _ := s.Projects()
+	as, _ := s.Agents(ps[0].ID)
+	lead, report := as[0], as[1]
+	s.SaveGoal(lead.ID, Goal{Title: "ship it", Checks: "true"})
+	s.SaveGoal(report.ID, Goal{Title: "its part", Checks: "true"})
+	s.SQL().Exec(`PRAGMA user_version = 1`) // as before goal lists
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	q, _ := s2.Queue(lead.ID)
+	if len(q.Items) != 1 || q.Items[0].Title != "ship it" || q.Items[0].Status != "queued" {
+		t.Fatalf("lead's goals: %+v", q.Items)
+	}
+	if q, _ := s2.Queue(report.ID); len(q.Items) != 0 {
+		t.Fatalf("a report's goal isn't a list: %+v", q.Items)
+	}
+}

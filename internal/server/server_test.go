@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,7 +112,7 @@ func TestPages(t *testing.T) {
 		t.Fatalf("/: %d → %q", w.Code, w.Header().Get("Location"))
 	}
 	page := a.must(200, "GET", "/arrange?p="+a.pid, "")
-	if !strings.Contains(page, `rel="icon"`) || !strings.Contains(page, "API Coder") {
+	if !strings.Contains(page, `rel="icon"`) || !strings.Contains(page, "API Programmer") {
 		t.Fatal("arrange page should carry the favicon and the demo agents")
 	}
 	if v := version.Get(); !strings.Contains(page, `id="version"`) || !strings.Contains(page, v.Version) {
@@ -332,8 +333,9 @@ func TestRunThenWorkWithTheChanges(t *testing.T) {
 		t.Fatalf("preview: %+v", m)
 	}
 	a.must(200, "POST", "/api/agents/k/merge", `{"target":"feature","strategy":"squash"}`)
-	if out, _ := git.Run(repo, "log", "-1", "--format=%s", "feature"); strings.TrimSpace(out) != "write files" {
-		t.Fatalf("squash commit message should default to the goal: %q", out)
+	// the message is the change itself; the hunk removed and brought back by hand isn't a change
+	if out, _ := git.Run(repo, "log", "-1", "--format=%B", "feature"); strings.TrimSpace(out) != "Write files" {
+		t.Fatalf("squash commit message should list the change: %q", out)
 	}
 }
 
@@ -499,4 +501,298 @@ func TestRequestChangesAPI(t *testing.T) {
 	if g, _ := a.st.Goal("k"); g.Status != "done" || g.Title != "write out.txt" {
 		t.Fatalf("goal kept, run done: %+v", g)
 	}
+}
+
+// A manager that asks for approval waits with its plan; the page reads it, can't move its
+// reports meanwhile, and approves it through the API.
+func TestPlanApprovalAPI(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, "plan.sh"), []byte(`cat >/dev/null; echo '{"subgoals":[{"agent":"k","title":"do it","checks":["true"]}]}'`+"\n"), 0o644)
+	git.Commit(repo, "add plan.sh")
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	arrangement := `[{"id":"m","name":"Lead","role":"manager","approvePlan":true},{"id":"k","name":"Kid","role":"coder","parent":"m"}]`
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", arrangement)
+	if m, _, _ := a.st.Agent("m"); !m.ApprovePlan {
+		t.Fatal("a new agent should take approvePlan from the arrangement")
+	}
+	a.must(204, "PUT", "/api/agents/m", `{"name":"Lead","runtime":"generic","args":"sh plan.sh","approvePlan":true}`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(204, "PUT", "/api/agents/m/goal", `{"title":"lead","checks":"true"}`)
+	a.must(404, "GET", "/api/agents/m/plan", "")
+
+	a.must(202, "POST", "/api/agents/m/run", "")
+	var draft store.Plan
+	for deadline := time.Now().Add(20 * time.Second); draft.ID == 0; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no plan to approve")
+		}
+		if code, body := a.do("GET", "/api/agents/m/plan", ""); code == 200 {
+			json.Unmarshal([]byte(body), &draft)
+		}
+	}
+	if draft.Kind != "plan" || !strings.Contains(string(draft.JSON), "do it") {
+		t.Fatalf("draft: %+v", draft)
+	}
+	a.must(409, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"m","name":"Lead","role":"manager"},{"id":"k","name":"Kid","role":"coder"}]`)
+	id := strconv.FormatInt(draft.ID, 10)
+	a.must(409, "POST", "/api/agents/m/plan", `{"draft":`+id+`1,"action":"approve"}`)
+	a.must(400, "POST", "/api/agents/m/plan", `{"draft":`+id+`,"action":"approve","subgoals":[{"agent":"k","title":"no checks"}]}`)
+	a.must(202, "POST", "/api/agents/m/plan", `{"draft":`+id+`,"action":"approve","subgoals":[{"agent":"k","title":"do it now","checks":["true"]}]}`)
+	for deadline := time.Now().Add(20 * time.Second); a.o.IsRunning("m"); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("run never finished")
+		}
+	}
+	if g, _ := a.st.Goal("m"); g.Status != "done" {
+		t.Fatalf("manager: %+v", g)
+	}
+	if g, _ := a.st.Goal("k"); g.Title != "do it now" || g.Status != "done" {
+		t.Fatalf("report runs the approved goal: %+v", g)
+	}
+}
+
+// Removing an agent removes its worktree, its branch in the user's repo, and its history.
+func TestRemovedAgentIsCleanedUp(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"},{"id":"s","name":"Stay","role":"coder"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"t","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/run", "")
+	for deadline := time.Now().Add(20 * time.Second); a.o.IsRunning("k"); time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("run never finished")
+		}
+	}
+	if !git.BranchExists(repo, "arranger/k") {
+		t.Fatal("the run should have made a branch")
+	}
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"s","name":"Stay","role":"coder"}]`)
+	if _, err := os.Stat(a.o.Dir("k")); err == nil {
+		t.Error("worktree still there")
+	}
+	if git.BranchExists(repo, "arranger/k") {
+		t.Error("branch still there")
+	}
+	var rows int
+	a.st.SQL().QueryRow(`SELECT (SELECT count(*) FROM runs WHERE agent_id='k') + (SELECT count(*) FROM events WHERE agent_id='k')`).Scan(&rows)
+	if rows != 0 {
+		t.Errorf("%d history rows left", rows)
+	}
+}
+
+// Opening the merge preview doesn't change the agent's work; merging includes what wasn't committed.
+func TestMergePreviewOnlyReads(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"coder"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(204, "PUT", "/api/agents/k/goal", `{"title":"t","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/run", "")
+	for a.o.IsRunning("k") {
+		time.Sleep(50 * time.Millisecond)
+	}
+	os.WriteFile(filepath.Join(a.o.Dir("k"), "late.txt"), []byte("late\n"), 0o644) // changed after its last checkpoint
+	head, _ := git.Run(a.o.Dir("k"), "rev-parse", "HEAD")
+	var m git.MergePreview
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/merge?target=out", "")), &m)
+	if after, _ := git.Run(a.o.Dir("k"), "rev-parse", "HEAD"); after != head || m.Uncommitted != 1 {
+		t.Fatalf("preview committed (%v) or missed the uncommitted file: %+v", after != head, m)
+	}
+	a.must(200, "POST", "/api/agents/k/merge", `{"target":"out","strategy":"merge"}`)
+	if _, err := git.Run(repo, "cat-file", "-e", "out:late.txt"); err != nil {
+		t.Fatal("merging should include the uncommitted file")
+	}
+}
+
+// The queue API: add, edit, reorder, skip, remove and run goals one after another.
+func TestQueueAPI(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(400, "POST", "/api/agents/k/queue", `{"title":"no checks"}`)
+	a.must(400, "POST", "/api/agents/k/queue/start", "")
+	ids := []int64{}
+	for _, title := range []string{"one", "two", "three", "four"} {
+		var it store.QueueItem
+		json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/queue", `{"title":"`+title+`","checks":"true"}`)), &it)
+		ids = append(ids, it.ID)
+	}
+	id := func(i int) string { return strconv.FormatInt(ids[i], 10) }
+	a.must(204, "PUT", "/api/agents/k/queue/"+id(0), `{"title":"one, edited","checks":"true"}`)
+	a.must(204, "POST", "/api/agents/k/queue/order", `{"ids":[`+id(1)+`,`+id(0)+`,`+id(2)+`,`+id(3)+`]}`)
+	a.must(204, "POST", "/api/agents/k/queue/"+id(2)+"/skip", "")
+	a.must(204, "DELETE", "/api/agents/k/queue/"+id(3), "")
+	a.must(204, "PUT", "/api/agents/k/queue/settings", `{"onFail":"skip"}`)
+	a.must(400, "PUT", "/api/agents/k/queue/settings", `{"onFail":"explode"}`)
+	a.must(202, "POST", "/api/agents/k/queue/start", "")
+	var q store.Queue
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/queue", "")), &q)
+		if !q.Active && !a.o.IsRunning("k") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queue never finished")
+		}
+	}
+	order := []string{}
+	for _, it := range q.Items {
+		order = append(order, it.Title+":"+it.Status)
+	}
+	// finished goals come newest first; the skipped one stays in the history, the removed one is gone
+	if got := strings.Join(order, " "); !strings.Contains(got, "one, edited:done") || !strings.Contains(got, "two:done") ||
+		!strings.Contains(got, "three:skipped") || strings.Contains(got, "four") || q.OnFail != "skip" {
+		t.Fatalf("queue: %s (onFail %s)", got, q.OnFail)
+	}
+	if g, _ := a.st.Goal("k"); g.Title != "one, edited" {
+		t.Fatalf("the last goal it ran is its goal now: %q", g.Title)
+	}
+	a.must(409, "PUT", "/api/agents/k/queue/"+id(1), `{"title":"too late","checks":"true"}`)
+}
+
+// Run all runs each top-level agent's goals.
+func TestRunAllRunsGoals(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"},{"id":"idle","name":"Idle","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"one","checks":"true"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"two","checks":"true"}`)
+	var r struct{ Started int }
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects/"+p.ID+"/run", "")), &r)
+	if r.Started != 1 {
+		t.Fatalf("started %d, want only the agent with goals", r.Started)
+	}
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if q, _ := a.st.Queue("k"); !q.Active && !a.o.IsRunning("k") {
+			if q.Items[0].Status != "done" || q.Items[1].Status != "done" {
+				t.Fatalf("goals: %+v", q.Items)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("goals never finished")
+		}
+	}
+}
+
+// Request changes on an older finished goal makes that goal the agent's goal again for the change.
+func TestReviseFinishedGoal(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	var first store.QueueItem
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/queue", `{"title":"first","checks":"true"}`)), &first)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"second","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/queue/start", "")
+	wait := func() {
+		for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+			if q, _ := a.st.Queue("k"); !q.Active && !a.o.IsRunning("k") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("never finished")
+			}
+		}
+	}
+	wait()
+	if g, _ := a.st.Goal("k"); g.Title != "second" {
+		t.Fatalf("goal after the list: %q", g.Title)
+	}
+	a.must(404, "POST", "/api/agents/k/revise", `{"change":"x","goal":99999}`)
+	a.must(202, "POST", "/api/agents/k/revise", `{"change":"make it nicer","goal":`+strconv.FormatInt(first.ID, 10)+`}`)
+	wait()
+	if g, _ := a.st.Goal("k"); g.Title != "first" || g.Status != "done" {
+		t.Fatalf("the change should run with the first goal: %+v", g)
+	}
+}
+
+// Merging an agent's work lists every change from all its goals, not just the last goal.
+func TestMergeMessageListsEveryChange(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, "w.sh"), []byte("p=$(cat); date +%s%N > out.txt\ncase \"$p\" in *first*) echo 'Commit: add the first thing' ;; *) echo 'Commit: add the second thing' ;; esac\n"), 0o644)
+	git.Commit(repo, "add w.sh")
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"sh w.sh"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"first goal","checks":"true"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"second goal","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/queue/start", "")
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if q, _ := a.st.Queue("k"); !q.Active && !a.o.IsRunning("k") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never finished")
+		}
+	}
+	var m git.MergePreview
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/merge?target=release", "")), &m)
+	want := "2 changes: Add the first thing; Add the second thing\n\n- Add the first thing\n- Add the second thing\n"
+	if m.Message != want {
+		t.Fatalf("preview message:\n%q\nwant\n%q", m.Message, want)
+	}
+	a.must(200, "POST", "/api/agents/k/merge", `{"target":"release","strategy":"merge"}`)
+	if out, _ := git.Run(repo, "log", "-1", "--format=%B", "release"); strings.TrimSpace(out) != strings.TrimSpace(want) {
+		t.Fatalf("merge commit message:\n%s", out)
+	}
+}
+
+// Checks are suggested from the repo's own build files.
+func TestSuggestChecks(t *testing.T) {
+	repo := t.TempDir()
+	os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module x\n"), 0o644)
+	os.WriteFile(filepath.Join(repo, "package.json"), []byte(`{"scripts":{"build":"vite build","test":"echo \"Error: no test specified\" && exit 1","lint":"eslint ."}}`), 0o644)
+	os.WriteFile(filepath.Join(repo, "pnpm-lock.yaml"), nil, 0o644)
+	os.WriteFile(filepath.Join(repo, "Makefile"), []byte("build:\n\tgo build\ntest:\n\tgo test ./...\n"), 0o644)
+	var got []string
+	for _, c := range suggestChecks(repo) {
+		got = append(got, c.Cmd)
+	}
+	want := "go build ./...|go vet ./...|go test ./...|pnpm run build|pnpm run lint|make test"
+	if strings.Join(got, "|") != want {
+		t.Fatalf("got  %s\nwant %s", strings.Join(got, "|"), want)
+	}
+	if len(suggestChecks("")) != 0 {
+		t.Fatal("no repo, no suggestions")
+	}
+}
+
+// Starter teams are always there; the user's own templates can be saved and deleted.
+func TestTemplatesAPI(t *testing.T) {
+	a := newApp(t)
+	var s struct {
+		Tools     []tool
+		Templates []store.Template
+	}
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/setup?project="+a.pid, "")), &s)
+	if len(s.Templates) != 3 || s.Templates[0].Name != "Feature team" || s.Templates[0].Agents[1].Prompt == "" || len(s.Tools) == 0 {
+		t.Fatalf("setup: %+v", s)
+	}
+	a.must(400, "POST", "/api/templates", `{"name":"empty","agents":[]}`)
+	var saved store.Template
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/templates", `{"name":"Mine","agents":[{"key":"x","name":"X","role":"programmer"}]}`)), &saved)
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/setup?project="+a.pid, "")), &s)
+	if len(s.Templates) != 4 || s.Templates[3].Name != "Mine" {
+		t.Fatalf("saved template missing: %+v", s.Templates)
+	}
+	a.must(400, "DELETE", "/api/templates/starter-docs", "")
+	a.must(204, "DELETE", "/api/templates/"+saved.ID, "")
 }

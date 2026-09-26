@@ -98,17 +98,17 @@ func TestParseOthers(t *testing.T) {
 }
 
 func TestCommand(t *testing.T) {
-	if _, err := Runtimes["generic"].Command(context.Background(), "", "", "x"); err == nil {
+	if _, err := Runtimes["generic"].Command(context.Background(), "", "", "x", nil); err == nil {
 		t.Error("generic without a command should fail")
 	}
-	cmd, err := Runtimes["generic"].Command(context.Background(), "", "sh -c cat", "hello")
+	cmd, err := Runtimes["generic"].Command(context.Background(), "", "sh -c cat", "hello", nil)
 	if err != nil || cmd.Args[0] != "sh" {
 		t.Fatalf("generic: %v %v", cmd, err)
 	}
 	if out, _ := cmd.Output(); string(out) != "hello" {
 		t.Errorf("generic stdin: %q", out)
 	}
-	if cmd, err := Runtimes["codex"].Command(context.Background(), "o3", "--foo", "do it"); err == nil {
+	if cmd, err := Runtimes["codex"].Command(context.Background(), "o3", "--foo", "do it", nil); err == nil {
 		if got := strings.Join(cmd.Args[1:], " "); got != "exec --json --full-auto -m o3 --foo -" {
 			t.Errorf("codex args: %s", got)
 		}
@@ -121,5 +121,25 @@ func TestParseClaudeUsage(t *testing.T) {
 	want := []Event{{Kind: "msg", Text: "hi"}, {Kind: "usage", ID: "m1", In: 105, Out: 7}}
 	if !reflect.DeepEqual(es, want) {
 		t.Fatalf("got %+v", es)
+	}
+}
+
+// Claude Code refuses most shell commands in -p mode unless they're allowed; a worker's checks are.
+func TestClaudeAllowsChecks(t *testing.T) {
+	got := strings.Join(claudeAllow([]string{"go test ./...", "CI=1 npm run lint && ./scripts/verify.sh", " "}), " ")
+	want := "--allowedTools Bash(go test ./...) Bash(go:*) Bash(CI=1 npm run lint && ./scripts/verify.sh) Bash(npm:*)"
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+	if claudeAllow(nil) != nil {
+		t.Fatal("no checks, no flag")
+	}
+	rt := Runtime{Bin: "sh", Args: withModel(""), Allow: claudeAllow}
+	cmd, err := rt.Command(context.Background(), "", "--extra", "p", []string{"make test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := strings.Join(cmd.Args[1:], " "); a != "--allowedTools Bash(make test) Bash(make:*) --extra" {
+		t.Fatalf("args: %s", a)
 	}
 }

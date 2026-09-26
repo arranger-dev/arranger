@@ -80,9 +80,6 @@ func (i Info) Short() string {
 func (i Info) String() string {
 	var parts []string
 	if c := i.Short(); c != "" {
-		if i.Dirty {
-			c += "+dirty"
-		}
 		parts = append(parts, c)
 	}
 	if w := i.When(); w != "" {

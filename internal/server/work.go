@@ -188,7 +188,7 @@ func (s *Server) hunks(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusConflict, err)
 			return
 		}
-		git.Commit(wk.dir, fmt.Sprintf("arranger: user removed %d change(s)", n))
+		git.Commit(wk.dir, fmt.Sprintf("Remove %d change(s) by hand in the Diff tab\n\nThe agent won't add them back.", n))
 		notes := wk.g.Notes + patch
 		if len(notes) > 8000 { // keep the newest removals; the prompt shouldn't grow without bound
 			notes = notes[len(notes)-8000:]
@@ -216,7 +216,7 @@ func (s *Server) hunks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if applied > 0 {
-			git.Commit(mdir, fmt.Sprintf("arranger: promote %d change(s) from %s", applied, wk.a.Name))
+			git.Commit(mdir, fmt.Sprintf("Promote %d change(s) from %s by hand in the Diff tab", applied, wk.a.Name))
 			s.changed(wk.p, mgr, mdir, mbase)
 		}
 		writeJSON(w, map[string]any{"applied": applied, "present": present, "to": mgr.Name})
@@ -226,6 +226,16 @@ func (s *Server) hunks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// mergeMessage lists every change merging the agent's branch into target brings in: its work from
+// all its goals, not just the last one.
+func (s *Server) mergeMessage(wk work, target string) string {
+	into := target
+	if !git.BranchExists(wk.p.Repo, target) {
+		into = wk.p.Base
+	}
+	return orch.MergeMessage(git.ChangeLines(wk.p.Repo, into, git.BranchOf(wk.a.ID), s.st.CheckpointGoal), wk.g.Title)
 }
 
 // merge previews (GET) or performs (POST) merging an agent's branch into a branch of the user's repo.
@@ -256,18 +266,20 @@ func (s *Server) merge(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusConflict, errors.New("stop "+wk.a.Name+" before merging its work"))
 		return
 	}
-	git.Commit(wk.dir, "arranger: save work before merge") // include anything not yet committed
-	if r.Method == http.MethodGet {
+	if r.Method == http.MethodGet { // a preview only reads: uncommitted work is counted, not committed
 		m, err := git.PreviewMerge(wk.p.Repo, git.BranchOf(wk.a.ID), req.Target, wk.p.Base)
 		if err != nil {
 			fail(w, http.StatusInternalServerError, err)
 			return
 		}
+		m.Uncommitted = git.Uncommitted(wk.dir)
+		m.Message = s.mergeMessage(wk, req.Target)
 		writeJSON(w, m)
 		return
 	}
+	git.Commit(wk.dir, "Save uncommitted work before merging") // include anything not yet committed
 	if req.Message = strings.TrimSpace(req.Message); req.Message == "" {
-		req.Message = wk.g.Title
+		req.Message = s.mergeMessage(wk, req.Target)
 	}
 	if req.Message == "" {
 		req.Message = "Merge work from " + wk.a.Name

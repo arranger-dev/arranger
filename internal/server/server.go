@@ -52,8 +52,21 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("PUT /api/agents/{id}/goal", s.saveGoal)
 	mux.HandleFunc("POST /api/agents/{id}/run", s.run)
 	mux.HandleFunc("POST /api/agents/{id}/revise", s.revise)
+	mux.HandleFunc("POST /api/agents/{id}/continue", s.continueRun)
+	mux.HandleFunc("GET /api/agents/{id}/queue", s.getQueue)
+	mux.HandleFunc("POST /api/agents/{id}/queue", s.addQueueItem)
+	mux.HandleFunc("PUT /api/agents/{id}/queue/{item}", s.queueItem(s.editQueueItem))
+	mux.HandleFunc("DELETE /api/agents/{id}/queue/{item}", s.queueItem(func(a string, id int64, _ *http.Request) error { return s.st.DeleteQueueItem(a, id) }))
+	mux.HandleFunc("POST /api/agents/{id}/queue/{item}/skip", s.queueItem(func(a string, id int64, _ *http.Request) error { return s.st.SkipQueueItem(a, id) }))
+	mux.HandleFunc("POST /api/agents/{id}/queue/order", s.reorderQueue)
+	mux.HandleFunc("POST /api/agents/{id}/queue/start", s.startQueue)
+	mux.HandleFunc("POST /api/agents/{id}/queue/pause", s.pauseQueue)
+	mux.HandleFunc("PUT /api/agents/{id}/queue/settings", s.queueSettings)
+	mux.HandleFunc("GET /api/agents/{id}/plan", s.getPlan)
+	mux.HandleFunc("POST /api/agents/{id}/plan", s.decidePlan)
 	mux.HandleFunc("POST /api/agents/{id}/stop", s.stop)
 	mux.HandleFunc("GET /api/agents/{id}/events", s.events)
+	mux.HandleFunc("GET /api/agents/{id}/runs", s.runs)
 	mux.HandleFunc("GET /api/agents/{id}/diff", s.diff)
 	mux.HandleFunc("GET /api/agents/{id}/checkpoints", s.checkpoints)
 	mux.HandleFunc("POST /api/agents/{id}/revert", s.revert)
@@ -61,6 +74,9 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("POST /api/agents/{id}/hunks", s.hunks)
 	mux.HandleFunc("GET /api/agents/{id}/merge", s.merge)
 	mux.HandleFunc("POST /api/agents/{id}/merge", s.merge)
+	mux.HandleFunc("GET /api/setup", s.setup)
+	mux.HandleFunc("POST /api/templates", s.saveTemplate)
+	mux.HandleFunc("DELETE /api/templates/{id}", s.deleteTemplate)
 	mux.HandleFunc("POST /api/types", s.saveType)
 	mux.HandleFunc("PUT /api/types/{id}", s.saveType)
 	mux.HandleFunc("DELETE /api/types/{id}", s.deleteType)
@@ -122,7 +138,7 @@ func (s *Server) arrange(w http.ResponseWriter, r *http.Request) {
 	}
 	err = s.pages.ExecuteTemplate(w, "arrange.html", map[string]any{
 		"Projects": ps, "Project": cur, "Agents": as, "Runtimes": names, "Installed": installed,
-		"Types": types, "Build": s.build, "Version": version.Get(), "Repo": version.Repo,
+		"Types": types, "Roles": store.RolePrompts, "Build": s.build, "Version": version.Get(), "Repo": version.Repo,
 	})
 	if err != nil {
 		zap.L().Error("render page", zap.Error(err))

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, so the binary stays cgo-free
@@ -38,6 +39,15 @@ CREATE TABLE IF NOT EXISTS agent_types (
   model TEXT NOT NULL DEFAULT '', args TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS queue (
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, pos INTEGER NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+  criteria TEXT NOT NULL DEFAULT '', checks TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued',
+  session INTEGER NOT NULL DEFAULT 0, finished INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS queue_agent ON queue(agent_id, status, pos);
+CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, about TEXT NOT NULL DEFAULT '', json TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS plans (
+  id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', feedback TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0);
 `
 
 // migrations add columns to tables created by older versions; "duplicate column" errors are expected.
@@ -47,11 +57,22 @@ var migrations = []string{
 	`ALTER TABLE agents ADD COLUMN token_soft INTEGER NOT NULL DEFAULT 0`, // warn above this many tokens per run; 0 = off
 	`ALTER TABLE agents ADD COLUMN token_hard INTEGER NOT NULL DEFAULT 0`, // stop above this many tokens per run; 0 = off
 	`ALTER TABLE goals ADD COLUMN since INTEGER NOT NULL DEFAULT 0`,       // when the current run started (ms)
+	`ALTER TABLE goals ADD COLUMN from_branch TEXT NOT NULL DEFAULT ''`,   // the branch its work is based on; a change means it moved
 	`ALTER TABLE agents ADD COLUMN color TEXT NOT NULL DEFAULT ''`,        // overrides the role's color; '' = role color
+	`ALTER TABLE events ADD COLUMN session INTEGER NOT NULL DEFAULT 0`,    // which run of the agent it belongs to; 0 = before this existed
 	`ALTER TABLE agents ADD COLUMN x REAL`,                                // canvas position; NULL = lay out automatically
 	`ALTER TABLE agents ADD COLUMN y REAL`,
 	// a crash mid-run leaves stale statuses behind
-	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing')`,
+	`UPDATE goals SET status = 'stopped' WHERE status IN ('starting', 'running', 'verifying', 'planning', 'waiting', 'reviewing', 'awaiting', 'fixing')`,
+	`ALTER TABLE agents ADD COLUMN approve_plan INTEGER NOT NULL DEFAULT 0`, // a manager waits for the user to approve its plan (opt-in)
+	// nobody is waiting on a draft plan after a restart
+	`UPDATE agents SET role = 'programmer' WHERE role = 'coder'`,                // the Coder type is now called Programmer
+	`ALTER TABLE agents ADD COLUMN queue_active INTEGER NOT NULL DEFAULT 0`,     // runs its queued goals one after another
+	`ALTER TABLE agents ADD COLUMN queue_on_fail TEXT NOT NULL DEFAULT 'pause'`, // pause | skip
+	// a restart ends the run a queue was on; the queue waits for the user to start it again
+	`UPDATE queue SET status = 'stopped' WHERE status = 'running'`,
+	`UPDATE agents SET queue_active = 0`,
+	`UPDATE plans SET status = 'expired', decided = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE status = 'pending'`,
 }
 
 type Project struct {
@@ -75,6 +96,8 @@ type Agent struct {
 	Color   string   `json:"color"`
 	X       *float64 `json:"x"` // nil until the user places the box
 	Y       *float64 `json:"y"`
+
+	ApprovePlan bool `json:"approvePlan"` // as a manager, wait for the user to approve each plan
 }
 
 // AgentType is a user-defined palette entry: a role with default settings for new agents.
@@ -102,27 +125,29 @@ type Goal struct {
 	Dels     int    `json:"dels"`
 	Base     string `json:"base"`
 	Notes    string `json:"notes"`
+	From     string `json:"from"` // the branch Base came from: its manager's, or the project base
 }
 
 // LogEvent is one line of an agent's activity log.
 type LogEvent struct {
-	ID    int64  `json:"id"`
-	Agent string `json:"agent"`
-	Run   int64  `json:"run"`
-	TS    int64  `json:"ts"`
-	Kind  string `json:"kind"`
-	Text  string `json:"text"`
-	Raw   string `json:"raw,omitempty"`
+	ID      int64  `json:"id"`
+	Agent   string `json:"agent"`
+	Run     int64  `json:"run"`     // the runs row: one agent process call (an attempt, a plan, a review)
+	Session int64  `json:"session"` // the run the user sees: everything from pressing Run to its result; 0 = unknown
+	Attempt int    `json:"attempt"` // the worker attempt Run belongs to, when known (read only)
+	TS      int64  `json:"ts"`
+	Kind    string `json:"kind"`
+	Text    string `json:"text"`
+	Raw     string `json:"raw,omitempty"`
 }
 
 // DemoAgents seed the first project so the arrange screen isn't empty.
 var DemoAgents = []Agent{
 	{ID: "lead", Name: "Lead", Role: "manager"},
 	{ID: "be", Name: "Backend", Role: "manager", Parent: "lead"},
-	{ID: "fe", Name: "Frontend", Role: "coder", Parent: "lead"},
-	{ID: "rev", Name: "Reviewer", Role: "reviewer", Parent: "lead"},
-	{ID: "api", Name: "API Coder", Role: "coder", Parent: "be"},
-	{ID: "db", Name: "DB Coder", Role: "coder", Parent: "be"},
+	{ID: "fe", Name: "Frontend", Role: "programmer", Parent: "lead"},
+	{ID: "api", Name: "API Programmer", Role: "programmer", Parent: "be"},
+	{ID: "db", Name: "DB Programmer", Role: "programmer", Parent: "be"},
 	{ID: "test", Name: "Tester", Role: "tester", Parent: "be"},
 }
 
@@ -144,6 +169,26 @@ func Open(path string) (*Store, error) {
 	for _, m := range migrations {
 		db.Exec(m)
 	}
+	// once: agents of a default type that have no instructions get their type's defaults
+	var v int
+	db.QueryRow(`PRAGMA user_version`).Scan(&v)
+	if v < 1 {
+		for role, prompt := range RolePrompts {
+			db.Exec(`UPDATE agents SET prompt = ? WHERE role = ? AND trim(prompt) = ''`, prompt, role)
+		}
+		db.Exec(`PRAGMA user_version = 1`)
+		v = 1
+	}
+	// once: a top-level agent's single goal becomes the first in its list of goals
+	if v < 2 {
+		db.Exec(`INSERT INTO queue(agent_id, pos, title, body, criteria, checks, status, finished)
+			SELECT a.id, 1, g.title, g.body, g.criteria, g.checks,
+				CASE WHEN g.status = 'done' THEN 'done' WHEN g.status IN ('failed', 'blocked', 'stopped') THEN g.status ELSE 'queued' END,
+				CASE WHEN g.status IN ('done', 'failed', 'blocked', 'stopped') THEN CAST(strftime('%s','now') AS INTEGER) * 1000 ELSE 0 END
+			FROM agents a JOIN goals g ON g.agent_id = a.id
+			WHERE a.parent = '' AND trim(g.title) != '' AND trim(g.checks) != '' AND NOT EXISTS (SELECT 1 FROM queue q WHERE q.agent_id = a.id)`)
+		db.Exec(`PRAGMA user_version = 2`)
+	}
 	s := &Store{db: db}
 	var n int
 	db.QueryRow(`SELECT count(*) FROM projects`).Scan(&n)
@@ -156,6 +201,7 @@ func Open(path string) (*Store, error) {
 	}
 	as := make([]Agent, len(DemoAgents))
 	for i, a := range DemoAgents {
+		a.Prompt = RolePrompts[a.Role]
 		a.ID = p.ID + "-" + a.ID
 		if a.Parent != "" {
 			a.Parent = p.ID + "-" + a.Parent
@@ -207,11 +253,11 @@ func (s *Store) Projects() ([]Project, error) {
 	return ps, rows.Err()
 }
 
-const agentCols = `id, name, role, parent, runtime, model, prompt, args, token_soft, token_hard, color, x, y`
+const agentCols = `id, name, role, parent, runtime, model, prompt, args, token_soft, token_hard, color, x, y, approve_plan`
 
 func scanAgent(sc interface{ Scan(...any) error }, extra ...any) (a Agent, err error) {
 	var x, y sql.NullFloat64
-	err = sc.Scan(append([]any{&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &a.Soft, &a.Hard, &a.Color, &x, &y}, extra...)...)
+	err = sc.Scan(append([]any{&a.ID, &a.Name, &a.Role, &a.Parent, &a.Runtime, &a.Model, &a.Prompt, &a.Args, &a.Soft, &a.Hard, &a.Color, &x, &y, &a.ApprovePlan}, extra...)...)
 	if x.Valid && y.Valid {
 		a.X, a.Y = &x.Float64, &y.Float64
 	}
@@ -252,8 +298,8 @@ func (s *Store) Agent(id string) (a Agent, projectID string, err error) {
 
 // UpdateAgent saves an agent's settings (not its place in the tree).
 func (s *Store) UpdateAgent(a Agent) error {
-	_, err := s.db.Exec(`UPDATE agents SET name=?, runtime=?, model=?, prompt=?, args=?, token_soft=?, token_hard=?, color=? WHERE id=?`,
-		a.Name, a.Runtime, a.Model, a.Prompt, a.Args, a.Soft, a.Hard, a.Color, a.ID)
+	_, err := s.db.Exec(`UPDATE agents SET name=?, runtime=?, model=?, prompt=?, args=?, token_soft=?, token_hard=?, color=?, approve_plan=? WHERE id=?`,
+		a.Name, a.Runtime, a.Model, a.Prompt, a.Args, a.Soft, a.Hard, a.Color, a.ApprovePlan, a.ID)
 	return err
 }
 
@@ -277,9 +323,9 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 			rt = "claude"
 		}
 		// settings only apply to new agents (e.g. from a custom type); existing ones keep theirs
-		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt, color, token_soft, token_hard, x, y) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		if _, err := tx.Exec(`INSERT INTO agents(id, project_id, name, role, parent, pos, runtime, model, args, prompt, color, token_soft, token_hard, x, y, approve_plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, role=excluded.role, parent=excluded.parent, pos=excluded.pos, x=excluded.x, y=excluded.y`,
-			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt, a.Color, a.Soft, a.Hard, a.X, a.Y); err != nil {
+			a.ID, projectID, a.Name, a.Role, a.Parent, i, rt, a.Model, a.Args, a.Prompt, a.Color, a.Soft, a.Hard, a.X, a.Y, a.ApprovePlan); err != nil {
 			return err
 		}
 		keep[a.ID] = true
@@ -301,8 +347,10 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 		if _, err := tx.Exec(`DELETE FROM agents WHERE id=?`, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM goals WHERE agent_id=?`, id); err != nil {
-			return err
+		for _, table := range []string{"goals", "runs", "events", "decisions", "plans", "queue"} {
+			if _, err := tx.Exec(`DELETE FROM `+table+` WHERE agent_id=?`, id); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -310,8 +358,8 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 
 // Goal returns an agent's goal; an agent without one gets an empty, idle goal.
 func (s *Store) Goal(agentID string) (g Goal, err error) {
-	err = s.db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes FROM goals WHERE agent_id=?`, agentID).
-		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes)
+	err = s.db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes, from_branch FROM goals WHERE agent_id=?`, agentID).
+		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes, &g.From)
 	if err == sql.ErrNoRows {
 		return Goal{Status: "idle"}, nil
 	}
@@ -339,7 +387,7 @@ func (s *Store) SetGoal(agentID string, kv map[string]any) {
 // AddEvent appends to the log, filling in the event's id and timestamp.
 func (s *Store) AddEvent(e *LogEvent) {
 	e.TS = time.Now().UnixMilli()
-	res, err := s.db.Exec(`INSERT INTO events(run_id, agent_id, ts, kind, text, raw) VALUES(?,?,?,?,?,?)`, e.Run, e.Agent, e.TS, e.Kind, e.Text, e.Raw)
+	res, err := s.db.Exec(`INSERT INTO events(run_id, session, agent_id, ts, kind, text, raw) VALUES(?,?,?,?,?,?,?)`, e.Run, e.Session, e.Agent, e.TS, e.Kind, e.Text, e.Raw)
 	if err != nil {
 		log.Printf("AddEvent: %v", err)
 		return
@@ -349,7 +397,8 @@ func (s *Store) AddEvent(e *LogEvent) {
 
 // Events returns the last limit events for an agent, oldest first.
 func (s *Store) Events(agentID string, limit int) ([]LogEvent, error) {
-	rows, err := s.db.Query(`SELECT * FROM (SELECT id, run_id, ts, kind, text, raw FROM events WHERE agent_id=? ORDER BY id DESC LIMIT ?) ORDER BY id`, agentID, limit)
+	rows, err := s.db.Query(`SELECT e.id, e.run_id, e.session, coalesce(r.attempt, 0), e.ts, e.kind, e.text, e.raw FROM
+		(SELECT * FROM events WHERE agent_id=? ORDER BY id DESC LIMIT ?) e LEFT JOIN runs r ON r.id = e.run_id ORDER BY e.id`, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -357,12 +406,60 @@ func (s *Store) Events(agentID string, limit int) ([]LogEvent, error) {
 	es := []LogEvent{}
 	for rows.Next() {
 		e := LogEvent{Agent: agentID}
-		if err := rows.Scan(&e.ID, &e.Run, &e.TS, &e.Kind, &e.Text, &e.Raw); err != nil {
+		if err := rows.Scan(&e.ID, &e.Run, &e.Session, &e.Attempt, &e.TS, &e.Kind, &e.Text, &e.Raw); err != nil {
 			return nil, err
 		}
 		es = append(es, e)
 	}
 	return es, rows.Err()
+}
+
+// RunUsage is one agent process call's time and tokens, for the Logs tab.
+type RunUsage struct {
+	ID      int64 `json:"id"`
+	Attempt int   `json:"attempt"`
+	Started int64 `json:"started"`
+	Ended   int64 `json:"ended"`
+	Tokens  int   `json:"tokens"`
+}
+
+// Runs lists an agent's last limit process calls, oldest first.
+func (s *Store) Runs(agentID string, limit int) ([]RunUsage, error) {
+	rows, err := s.db.Query(`SELECT * FROM (SELECT id, attempt, started, ended, tok_in + tok_out FROM runs WHERE agent_id=? ORDER BY id DESC LIMIT ?) ORDER BY id`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rs := []RunUsage{}
+	for rows.Next() {
+		var r RunUsage
+		if err := rows.Scan(&r.ID, &r.Attempt, &r.Started, &r.Ended, &r.Tokens); err != nil {
+			return nil, err
+		}
+		rs = append(rs, r)
+	}
+	return rs, rows.Err()
+}
+
+// CheckpointGoal is the goal an agent was working on when it made the checkpoint commit sha, from
+// the run log ("" when the log doesn't say). It describes checkpoints from before commits did.
+func (s *Store) CheckpointGoal(sha string) string {
+	var title string
+	s.db.QueryRow(`SELECT st.text FROM events c JOIN events st ON st.agent_id = c.agent_id AND st.session = c.session AND st.kind = 'start'
+		WHERE c.kind = 'msg' AND c.text LIKE 'checkpoint %' AND c.session != 0 AND length(c.text) > 14 AND ? LIKE substr(c.text, 12) || '%'
+		ORDER BY c.id DESC LIMIT 1`, sha).Scan(&title)
+	return strings.TrimSpace(title)
+}
+
+// LastDecision is the agent's latest decision of one of the kinds: its kind and JSON, or "" if none.
+func (s *Store) LastDecision(agentID string, kinds ...string) (kind, raw string) {
+	q := `SELECT kind, json FROM decisions WHERE agent_id=? AND kind IN (?` + strings.Repeat(",?", len(kinds)-1) + `) ORDER BY id DESC LIMIT 1`
+	args := []any{agentID}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	s.db.QueryRow(q, args...).Scan(&kind, &raw)
+	return
 }
 
 // AddDecision records a manager's plan or review verdicts.
@@ -371,6 +468,57 @@ func (s *Store) AddDecision(agentID, kind string, v any) {
 	if _, err := s.db.Exec(`INSERT INTO decisions(agent_id, ts, kind, json) VALUES(?,?,?,?)`, agentID, time.Now().UnixMilli(), kind, string(b)); err != nil {
 		log.Printf("AddDecision: %v", err)
 	}
+}
+
+// Plan is a manager's plan (kind "plan": subgoals) or routing of a requested change (kind
+// "revision": changes), kept as a draft while the user decides on it.
+type Plan struct {
+	ID       int64           `json:"id"`
+	Agent    string          `json:"agent"`
+	Kind     string          `json:"kind"`
+	JSON     json.RawMessage `json:"plan"`
+	Status   string          `json:"status"` // pending | approved | replanned | cancelled | expired
+	Feedback string          `json:"feedback"`
+	Created  int64           `json:"created"`
+}
+
+// SavePlan stores v as the agent's pending draft and returns its id.
+func (s *Store) SavePlan(agentID, kind string, v any) (int64, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0, err
+	}
+	res, err := s.db.Exec(`INSERT INTO plans(agent_id, kind, json, created) VALUES(?,?,?,?)`, agentID, kind, string(b), time.Now().UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// PendingPlan returns the agent's draft waiting for a decision; sql.ErrNoRows when there is none.
+func (s *Store) PendingPlan(agentID string) (p Plan, err error) {
+	var raw string
+	err = s.db.QueryRow(`SELECT id, agent_id, kind, json, status, feedback, created FROM plans WHERE agent_id=? AND status='pending' ORDER BY id DESC LIMIT 1`, agentID).
+		Scan(&p.ID, &p.Agent, &p.Kind, &raw, &p.Status, &p.Feedback, &p.Created)
+	p.JSON = json.RawMessage(raw)
+	return
+}
+
+// DecidePlan records the decision on a pending draft, with the plan as the user left it when v
+// isn't nil. It reports false when the draft was already decided, so only one decision wins.
+func (s *Store) DecidePlan(id int64, status, feedback string, v any) bool {
+	q, args := `UPDATE plans SET status=?, feedback=?, decided=? WHERE id=? AND status='pending'`, []any{status, feedback, time.Now().UnixMilli(), id}
+	if v != nil {
+		b, _ := json.Marshal(v)
+		q, args = `UPDATE plans SET status=?, feedback=?, decided=?, json=? WHERE id=? AND status='pending'`, []any{status, feedback, time.Now().UnixMilli(), string(b), id}
+	}
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		log.Printf("DecidePlan: %v", err)
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n == 1
 }
 
 // NewRun starts a run record for one attempt and returns its id.
@@ -411,6 +559,12 @@ type AgentStatus struct {
 	AllTokens int     `json:"allTokens"` // every run ever
 	Soft      int     `json:"tokenSoft"`
 	Hard      int     `json:"tokenHard"`
+	// its queue, for the badge on its box
+	QueueDone    int    `json:"queueDone"`    // goals it finished (done, failed, blocked, stopped)
+	QueueTotal   int    `json:"queueTotal"`   // every goal in it but skipped ones
+	QueueActive  bool   `json:"queueActive"`  // it's running through them
+	QueueWaiting int    `json:"queueWaiting"` // goals not run yet
+	QueuePaused  string `json:"queuePaused"`  // the goal whose failure paused it, when goals are still waiting
 }
 
 func (s *Store) Summary(projectID string) (Summary, error) {
@@ -420,7 +574,15 @@ func (s *Store) Summary(projectID string) (Summary, error) {
 		(SELECT coalesce(sum(cost),0) FROM runs r WHERE r.agent_id=a.id AND r.started >= coalesce(g.since,0)),
 		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id AND r.started >= coalesce(g.since,0)),
 		(SELECT coalesce(sum(cost),0) FROM runs r WHERE r.agent_id=a.id),
-		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id)
+		(SELECT coalesce(sum(tok_in+tok_out),0) FROM runs r WHERE r.agent_id=a.id),
+		(SELECT count(*) FROM queue q WHERE q.agent_id=a.id AND q.status IN ('done', 'failed', 'blocked', 'stopped')),
+		(SELECT count(*) FROM queue q WHERE q.agent_id=a.id AND q.status != 'skipped'),
+		a.queue_active,
+		(SELECT count(*) FROM queue q WHERE q.agent_id=a.id AND q.status='queued'),
+		CASE WHEN a.queue_active = 0 AND EXISTS (SELECT 1 FROM queue q WHERE q.agent_id=a.id AND q.status='queued')
+			THEN coalesce((SELECT CASE WHEN q.status IN ('failed', 'blocked') THEN q.title ELSE '' END FROM queue q
+				WHERE q.agent_id=a.id AND q.status IN ('done', 'failed', 'blocked', 'stopped') ORDER BY q.finished DESC LIMIT 1), '')
+			ELSE '' END
 		FROM agents a LEFT JOIN goals g ON g.agent_id = a.id WHERE a.project_id=?`, projectID)
 	if err != nil {
 		return sum, err
@@ -430,7 +592,8 @@ func (s *Store) Summary(projectID string) (Summary, error) {
 		var id string
 		var st AgentStatus
 		if err := rows.Scan(&id, &st.Title, &st.Status, &st.Attempts, &st.Passed, &st.Total, &st.Adds, &st.Dels, &st.Since,
-			&st.Soft, &st.Hard, &st.Cost, &st.Tokens, &st.AllCost, &st.AllTokens); err != nil {
+			&st.Soft, &st.Hard, &st.Cost, &st.Tokens, &st.AllCost, &st.AllTokens,
+			&st.QueueDone, &st.QueueTotal, &st.QueueActive, &st.QueueWaiting, &st.QueuePaused); err != nil {
 			return sum, err
 		}
 		sum.Agents[id] = st
