@@ -6,7 +6,7 @@
 # make dist     release archives for macOS and Linux in dist/
 # make clean    remove build output
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse HEAD 2>/dev/null)
 LDFLAGS := -s -w -X arranger/internal/version.Version=$(VERSION) \
 	-X arranger/internal/version.Commit=$(COMMIT) \

@@ -15,7 +15,7 @@ One agent with one huge prompt drifts, forgets, and claims success. A team with 
 - **Checks decide "done", not the agent.** Arranger runs your checks itself after every attempt and sends failures back with the exact output, up to three tries.
 - **Parallel and isolated.** Every agent works in its own git worktree and branch, so agents on the same level run at the same time without touching each other's files. Your branches are never changed until you merge.
 - **Review before anything merges.** Managers read each report's diff and accept it or send it back with feedback.
-- **You stay in control.** Live logs and status for every agent, a diff per agent, remove or promote single changes, revert any checkpoint, token limits per agent, and one-click merge into the branch you pick.
+- **You stay in control.** Approve or edit a manager's plan before its team runs, live logs and status for every agent, a diff per agent, remove or promote single changes, revert any checkpoint, token limits per agent, and one-click merge into the branch you pick.
 
 ## Install
 
@@ -43,30 +43,34 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
    arranger
    ```
 
-   Then open <http://127.0.0.1:7777>.
+   Then open <http://127.0.0.1:7889>.
 
 2. **Point it at a repo.** Click **Settings** in the header and enter the path to a git repository. Leave the base branch blank to use the current branch. The repo needs at least one commit.
 
-3. **Arrange the team.** Drag agent types from the left onto the canvas. Drop one agent onto another to put it under that agent. Click a box to pick its tool (runtime), model, color and instructions in the **Settings** tab. Click **Save**.
+3. **Arrange the team.** Press **Teams & Tools** in the sidebar to drop in a ready team (Feature team, Bug fix, Docs) and check which agent tools are installed, or drag agent types from the left onto the canvas. Drop one agent onto another to put it under that agent. Click a box to pick its tool (runtime), model, color and instructions in the **Settings** tab. Click **Save**.
 
-4. **Set the goal.** Select the top agent and fill in the **Goal** tab:
+4. **Add goals.** Select the top agent and press **+ Add goal** in its **Goal** tab. Each goal has:
    - **Goal:** the outcome, e.g. "Add rate limiting to /login".
    - **Acceptance criteria:** what reviewers should hold the work to.
    - **Checks:** one shell command per line. All of them must exit 0, e.g. `go test ./...`.
 
-5. **Run.** Press **Run**. A manager plans one subgoal (with its own checks) for each report, runs them in parallel, reviews and merges their work into its own branch, then runs its own checks. Links on the canvas animate while agents hand work down and report back. The **Logs** tab streams what each agent is doing.
+5. **Run.** Press **Run** and confirm the goals it will work through. They run one after another, each on the code the one before it left: a manager plans one subgoal (with its own checks) for each report, runs them in parallel, reviews and merges their work into its own branch, then runs its own checks. If a goal fails, it stops there or goes on with the next, as you choose. Links on the canvas animate while agents hand work down and report back, and the **Logs** tab shows each goal's run.
 
-6. **Iterate.** Not quite right? Select the agent and write what should change in **Request changes**. Ask the top manager and it passes each part to the agents it concerns and re-runs only them; everyone keeps their work, and the changes are reviewed, merged and checked like any run. (**Run** plans again from the goal instead.)
+   Want to check the plan first? Tick **Let me approve the plan before the team runs** under the manager's goals. The manager then stops after planning and shows you each report's goal and checks: edit them, skip or add reports, send the plan back with feedback, or approve it to start the team.
+
+6. **Iterate.** Not quite right? Select the agent and write what should change in **Request changes**. Ask the top manager and it passes each part to the agents it concerns and re-runs only them; everyone keeps their work, and the changes are reviewed, merged and checked like any run. (To redo a finished goal from scratch, use **Add again** on it and press **Run**.)
+
+   Blocked because one report failed? Fix what it needed, then press **Continue** on the manager: the reports that finished keep their work, only the others run again, and then everything is reviewed, merged and checked together, with no new plan.
 
 7. **Review and merge.** Open the **Diff** tab to see every change, remove or promote single hunks, or revert a checkpoint. When you're happy, press **Merge…** to merge the agent's branch into `main` (or any branch, created if needed) as a merge commit, a squash, or a fast-forward.
 
-**Stats** in the header shows cost, tokens, time and first-try success, per agent and per runtime.
+**Stats** (click the token count in the header) shows tokens, time and first-try success, per agent and per runtime.
 
 ## Options
 
 ```text
 arranger [flags]
-  -addr string      listen address (default "127.0.0.1:7777")
+  -addr string      listen address (default "127.0.0.1:7889")
   -data string      data directory (default "~/.arranger")
   -parallel int     max agent processes running at once (default 4)
   -log string       log level: debug, info, warn or error (default "info")

@@ -6,7 +6,7 @@ const PID = document.body.dataset.project;
 const main = $("main"), canvas = $("#canvas"), linksSvg = $("#links");
 const SVG = "http://www.w3.org/2000/svg";
 const MAX_LOG_ROWS = 1000;
-const BUSY = ["starting", "running", "verifying", "planning", "waiting", "reviewing"];
+const BUSY = ["starting", "running", "verifying", "planning", "waiting", "reviewing", "fixing"];
 const NEEDS = ["failed", "blocked"];
 const GAP_X = 240, GAP_Y = 150, PAD = 48, SNAP = 8;
 let dirty = false, selected = null, tab = "goal";
@@ -100,7 +100,7 @@ function layout(all) {
 // "down" while the manager hands out subgoals (planning, or the report is just starting),
 // "up" while the report works for its manager, or the manager reviews what it sent back.
 function linkFlow(mgrStatus, kidStatus) {
-  if (kidStatus === "starting" || mgrStatus === "planning") return { dir: "down", status: kidStatus === "starting" ? kidStatus : mgrStatus };
+  if (kidStatus === "starting" || mgrStatus === "planning" || mgrStatus === "fixing") return { dir: "down", status: kidStatus === "starting" ? kidStatus : mgrStatus };
   if (BUSY.includes(kidStatus)) return { dir: "up", status: kidStatus };
   if (mgrStatus === "reviewing" && kidStatus === "done") return { dir: "up", status: mgrStatus };
   return null;
@@ -124,7 +124,20 @@ function drawLinks() {
       path.dataset.status = flow.status;
       path.classList.add("flow", flow.dir);
     }
-    paths.push(path);
+    // hovering the line shows an x at its middle; clicking it removes the connection
+    const g = document.createElementNS(SVG, "g"), hit = path.cloneNode(), cut = document.createElementNS(SVG, "g");
+    g.setAttribute("class", "link");
+    hit.setAttribute("class", "hit");
+    cut.setAttribute("class", "cut");
+    cut.setAttribute("transform", `translate(${(x1 + x2) / 2},${(y1 + y2) / 2})`);
+    const ring = document.createElementNS(SVG, "circle"), x = document.createElementNS(SVG, "path"), tip = document.createElementNS(SVG, "title");
+    ring.setAttribute("r", 9);
+    x.setAttribute("d", "M-3.5,-3.5 L3.5,3.5 M3.5,-3.5 L-3.5,3.5");
+    tip.textContent = `Remove: ${a.name} stops reporting to ${p.name}`;
+    cut.append(tip, ring, x);
+    cut.addEventListener("click", () => unlink(a.id));
+    g.append(hit, path, cut);
+    paths.push(g);
   }
   linksSvg.replaceChildren(...paths);
   // room to spread out: the canvas always reaches well past the last box and the viewport
@@ -145,10 +158,12 @@ function addAgent(role, name, type, x, y, parent) {
     id: slug(role) + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     name, role, runtime: type?.runtime ?? "claude", parent: parent ?? "", color: "",
     x: Math.max(0, Math.round(x / SNAP) * SNAP), y: Math.max(0, Math.round(y / SNAP) * SNAP),
-    defaults: type ? { model: type.model, args: type.args, prompt: type.prompt } : null,
+    defaults: type ? { model: type.model, args: type.args, prompt: type.prompt }
+      : window.ROLES?.[role] ? { prompt: window.ROLES[role] } : null, // a default type starts with its role's instructions
   };
   agents.set(a.id, a);
   makeCard(a);
+  showEmptyCanvas();
   return a;
 }
 
@@ -184,10 +199,70 @@ main.addEventListener("drop", e => {
   refreshCards();
 });
 
+// unlink removes the connection above an agent: it no longer reports to anyone.
+function unlink(id) {
+  const a = agents.get(id), was = parentOf(id);
+  if (!a || !was) return;
+  a.parent = "";
+  paintCard(a);
+  drawLinks();
+  say(`${a.name} no longer reports to ${nameOf(was)} · unsaved`);
+  dirty = true;
+  if (selected === id) fillParents(id);
+}
+
+// linkFrom draws a connection from one of a box's dots, like draw.io. From the bottom dot, the agent
+// it's released over reports to this one; from a side dot, whichever box is higher on the canvas
+// manages (level: the one dropped on reports).
+function linkFrom(e, c) {
+  const src = agents.get(c.dataset.id), draft = document.createElementNS(SVG, "path"), cls = e.target.classList;
+  const side = cls.contains("left") ? -1 : cls.contains("right") ? 1 : 0, down = cls.contains("down");
+  draft.classList.add("draft");
+  canvas.classList.add("linking");
+  c.classList.add("src");
+  e.target.classList.add("on");
+  let over = null;
+  try { e.target.setPointerCapture(e.pointerId); } catch {}
+  const x1 = side ? src.x + (side > 0 ? c.offsetWidth : 0) : src.x + c.offsetWidth / 2;
+  const y1 = side ? src.y + c.offsetHeight / 2 : src.y + c.offsetHeight, dir = 1;
+  // the manager and the report a drop would make, and whether that changes anything without a loop
+  const managesIt = id => side ? agents.get(id).y >= src.y : down;
+  const pair = id => managesIt(id) ? { mgr: src.id, kid: id } : { mgr: id, kid: src.id };
+  const allowed = id => { const { mgr, kid } = pair(id); return agents.get(kid).parent !== mgr && !isUnder(mgr, kid); };
+  e.target.onpointermove = m => {
+    const r = canvas.getBoundingClientRect(), x2 = m.clientX - r.left, y2 = m.clientY - r.top;
+    const bend = Math.max(40, Math.abs((side ? x2 - x1 : y2 - y1)) / 2);
+    draft.setAttribute("d", side
+      ? `M${x1},${y1} C${x1 + side * bend},${y1} ${x2 - side * bend},${y2} ${x2},${y2}`
+      : `M${x1},${y1} C${x1},${y1 + dir * bend} ${x2},${y2 - dir * bend} ${x2},${y2}`);
+    if (!draft.isConnected) linksSvg.append(draft); // a live refresh may have redrawn the links
+    over?.classList.remove("drop");
+    over = document.elementsFromPoint(m.clientX, m.clientY).find(x => x !== c && x.matches?.("#canvas .card"));
+    if (over && !allowed(over.dataset.id)) over = null; // no-ops and loops
+    over?.classList.add("drop");
+  };
+  e.target.onpointerup = e.target.onpointercancel = () => {
+    e.target.onpointermove = e.target.onpointerup = e.target.onpointercancel = null;
+    draft.remove();
+    canvas.classList.remove("linking");
+    c.classList.remove("src");
+    e.target.classList.remove("on");
+    if (!over) return;
+    over.classList.remove("drop");
+    const { mgr, kid: kidId } = pair(over.dataset.id), kid = agents.get(kidId);
+    kid.parent = mgr;
+    paintCard(kid);
+    say(`${kid.name} now reports to ${nameOf(mgr)} · unsaved`);
+    dirty = true;
+    drawLinks();
+  };
+}
+
 // boxes on the canvas: drag to move; release over another box to report to it; click to open
 canvas.addEventListener("pointerdown", e => {
   const c = e.target.closest(".card");
   if (!c || e.button !== 0 || e.target.classList.contains("x")) return;
+  if (e.target.classList.contains("port")) { e.preventDefault(); linkFrom(e, c); return; }
   const a = agents.get(c.dataset.id), sx = e.clientX, sy = e.clientY, ox = a.x, oy = a.y;
   let moved = false, over = null;
   try { c.setPointerCapture(e.pointerId); } catch {} // keeps the drag when the pointer outruns the box
@@ -209,7 +284,14 @@ canvas.addEventListener("pointerdown", e => {
   c.onpointerup = c.onpointercancel = () => {
     c.onpointermove = c.onpointerup = c.onpointercancel = null;
     c.classList.remove("dragging");
-    if (!moved) { select(a.id); return; }
+    if (!moved && e.shiftKey) {
+      const ids = new Set(picked);
+      if (selected && !ids.size) ids.add(selected);
+      ids.has(a.id) ? ids.delete(a.id) : ids.add(a.id);
+      setPicked(ids);
+      return;
+    }
+    if (!moved) { setPicked([]); select(a.id); return; }
     if (over) {
       over.classList.remove("drop");
       a.parent = over.dataset.id;
@@ -221,34 +303,150 @@ canvas.addEventListener("pointerdown", e => {
     drawLinks();
   };
 });
-// empty space: drag to pan, like draw.io
+// picked: the agents selected together, by dragging a box around them or shift-clicking
+const picked = new Set();
+function setPicked(ids) {
+  picked.clear();
+  ids.forEach(id => picked.add(id));
+  for (const a of agents.values()) a.el.classList.toggle("picked", picked.has(a.id));
+  if (picked.size > 1) say(`${picked.size} agents selected · Backspace removes them, Esc clears`);
+}
+
+// empty space: drag to select the boxes in a rectangle, like draw.io; hold Space (or use the
+// middle button) and drag to move around, or just scroll
+let spaceDown = false;
+document.addEventListener("keydown", e => {
+  if (e.code !== "Space" || e.repeat || e.target.closest?.("input, textarea, select, button, [contenteditable], dialog")) return;
+  spaceDown = true;
+  main.classList.add("can-pan");
+  e.preventDefault();
+});
+document.addEventListener("keyup", e => { if (e.code === "Space") { spaceDown = false; main.classList.remove("can-pan"); } });
 main.addEventListener("pointerdown", e => {
-  if (e.button !== 0 || e.target.closest(".card, button")) return;
-  const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
+  if (e.button !== 0 && e.button !== 1 || e.target.closest("button, #links .link, #empty-canvas") || e.target.closest(".card") && !spaceDown) return;
   try { main.setPointerCapture(e.pointerId); } catch {}
-  main.classList.add("panning");
-  main.onpointermove = m => { main.scrollLeft = sx - m.clientX; main.scrollTop = sy - m.clientY; };
+  if (spaceDown || e.button === 1) {
+    e.preventDefault();
+    const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
+    main.classList.add("panning");
+    main.onpointermove = m => { main.scrollLeft = sx - m.clientX; main.scrollTop = sy - m.clientY; };
+    main.onpointerup = main.onpointercancel = () => {
+      main.onpointermove = main.onpointerup = main.onpointercancel = null;
+      main.classList.remove("panning");
+    };
+    return;
+  }
+  const r0 = canvas.getBoundingClientRect(), x0 = e.clientX - r0.left, y0 = e.clientY - r0.top;
+  const box = el("div");
+  box.id = "marquee";
+  let moved = false;
+  const before = e.shiftKey ? new Set(picked) : new Set(); // shift adds to what's selected
+  main.onpointermove = m => {
+    const r = canvas.getBoundingClientRect(), x1 = m.clientX - r.left, y1 = m.clientY - r.top;
+    if (!moved && Math.hypot(x1 - x0, y1 - y0) < 4) return;
+    if (!moved) { moved = true; canvas.append(box); }
+    const left = Math.min(x0, x1), top = Math.min(y0, y1), w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+    Object.assign(box.style, { left: left + "px", top: top + "px", width: w + "px", height: h + "px" });
+    const inside = [...agents.values()].filter(a => a.x < left + w && a.x + a.el.offsetWidth > left && a.y < top + h && a.y + a.el.offsetHeight > top).map(a => a.id);
+    setPicked([...before, ...inside]);
+  };
   main.onpointerup = main.onpointercancel = () => {
     main.onpointermove = main.onpointerup = main.onpointercancel = null;
-    main.classList.remove("panning");
+    box.remove();
+    if (!moved && !e.shiftKey) setPicked([]); // a click on empty space clears the selection
   };
 });
-canvas.addEventListener("click", e => {
-  if (!e.target.classList.contains("x")) return;
-  const id = e.target.closest(".card").dataset.id, a = agents.get(id);
-  if (BUSY.includes(a.el.dataset.status)) { say(`${a.name} is running; stop it before removing it`, true); return; }
-  kidsOf(id).forEach(k => k.parent = a.parent); // reports move up a level
-  if (selected === id) closeInspector();
-  a.el.remove();
-  agents.delete(id);
+// ask shows the styled confirm dialog and resolves true when the user presses the action button,
+// which is red unless danger is false.
+function ask(title, text, action, keep = "Cancel", danger = true) {
+  const d = $("#confirm-dialog");
+  $("#c-input").hidden = true;
+  $("#c-ok").classList.toggle("danger", danger);
+  $("#c-cancel").textContent = keep;
+  $("h3", d).textContent = title;
+  $("#c-text").textContent = text;
+  $("#c-text").hidden = !text;
+  $("#c-ok").textContent = action;
+  d.returnValue = "";
+  d.showModal();
+  $("#c-cancel").focus(); // Enter shouldn't delete by accident
+  return new Promise(r => d.addEventListener("close", () => r(d.returnValue === "ok"), { once: true }));
+}
+
+// removeAgent takes an agent off the canvas after the user confirms; its reports move up a level.
+async function removeAgent(id) { return removeAgents([id]); }
+
+// removeAgents takes agents off the canvas after one confirmation. Reports of a removed agent move
+// up to its nearest manager that stays.
+async function removeAgents(ids) {
+  const gone = ids.map(id => agents.get(id)).filter(Boolean);
+  if (!gone.length) return;
+  const busy = gone.filter(a => BUSY.includes(a.el.dataset.status));
+  if (busy.length) { say(`${names(busy.map(a => a.name))} ${busy.length === 1 ? "is" : "are"} running; stop ${busy.length === 1 ? "it" : "them"} before removing`, true); return; }
+  const out = new Set(gone.map(a => a.id));
+  const keeper = id => { let p = parentOf(id); while (p && out.has(p)) p = parentOf(p); return p || ""; };
+  const moving = [...agents.values()].filter(k => !out.has(k.id) && out.has(k.parent));
+  const withWork = gone.filter(a => summary.agents[a.id]?.adds || summary.agents[a.id]?.dels);
+  const notes = [];
+  if (gone.length === 1) {
+    const a = gone[0], st = summary.agents[a.id];
+    if (moving.length) notes.push(`Its ${moving.length === 1 ? "report moves" : `${moving.length} reports move`} up to ${keeper(a.id) ? nameOf(keeper(a.id)) : "the top level"}.`);
+    if (withWork.length) notes.push(`Its work (+${st.adds} −${st.dels}) and its branch arranger/${a.id} are deleted when you save. Merge it first if you want to keep it.`);
+  } else {
+    notes.push(names(gone.map(a => a.name)) + ".");
+    if (moving.length) notes.push(`${moving.length === 1 ? "1 report moves" : `${moving.length} reports move`} up to the nearest manager that stays.`);
+    if (withWork.length === gone.length) notes.push("Their work and branches are deleted when you save. Merge first if you want to keep it.");
+    else if (withWork.length) notes.push(`The work of ${names(withWork.map(a => a.name))} and ${withWork.length === 1 ? "its branch are" : "their branches are"} deleted when you save. Merge first if you want to keep it.`);
+  }
+  if (!await ask(gone.length === 1 ? `Remove ${gone[0].name}?` : `Remove ${gone.length} agents?`, notes.join(" "), gone.length === 1 ? "Remove" : `Remove ${gone.length}`)) return;
+  for (const k of moving) if (agents.has(k.id)) k.parent = keeper(k.id);
+  for (const a of gone) {
+    if (!agents.has(a.id)) continue; // removed some other way while the dialog was open
+    if (selected === a.id) closeInspector();
+    a.el.remove();
+    agents.delete(a.id);
+  }
+  setPicked([]);
   markDirty();
   drawLinks();
+  showEmptyCanvas();
+}
+canvas.addEventListener("click", e => {
+  if (e.target.classList.contains("x")) removeAgent(e.target.closest(".card").dataset.id);
 });
-canvas.addEventListener("dblclick", e => {
+// Backspace or Delete removes the selected agent, unless the user is typing or a dialog is open
+document.addEventListener("keydown", e => {
+  const t = e.target;
+  if (t.closest?.("input, textarea, select, [contenteditable], dialog") || document.querySelector("dialog[open]")) return;
+  if (e.key === "Escape" && picked.size) { setPicked([]); say(""); return; }
+  if (e.key.toLowerCase() === "a" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) { // select every agent
+    if (!agents.size) return;
+    e.preventDefault();
+    setPicked([...agents.keys()]);
+    return;
+  }
+  if (e.key !== "Backspace" && e.key !== "Delete" || e.metaKey || e.ctrlKey || e.altKey) return;
+  const ids = picked.size ? [...picked] : selected ? [selected] : [];
+  if (!ids.length) return;
+  e.preventDefault();
+  removeAgents(ids);
+});
+// askText is ask with a text field; it resolves to the text, or null when cancelled.
+async function askText(title, value, action) {
+  const done = ask(title, "", action, "Cancel", false), input = $("#c-input");
+  input.hidden = false;
+  input.value = value;
+  input.focus();
+  input.select();
+  return (await done) ? input.value.trim() : null;
+}
+
+canvas.addEventListener("dblclick", async e => {
   const c = e.target.closest(".card");
   const a = c && agents.get(c.dataset.id);
-  const v = a && prompt("Agent name", a.name);
-  if (v?.trim()) { a.name = v.trim(); paintCard(a); markDirty(); }
+  if (!a) return;
+  const v = await askText("Rename agent", a.name, "Rename");
+  if (v && v !== a.name) { a.name = v; paintCard(a); markDirty(); }
 });
 $("#tidy").onclick = () => {
   layout(true);
@@ -306,6 +504,7 @@ tform.onsubmit = async e => {
   e.preventDefault();
   try {
     if (action === "delete") {
+      if (!await ask(`Delete the ${editingType.name} type?`, "You can't drag new agents from it anymore. Agents already on the canvas keep their settings.", "Delete")) return;
       await api("DELETE", `/api/types/${editingType.id}`);
       TYPES.delete(editingType.name);
     } else {
@@ -322,10 +521,20 @@ tform.onsubmit = async e => {
 
 /* ---------- header: projects, theme, run all, stats ---------- */
 
-$("#project").onchange = e => {
-  if (dirty && !confirm("Discard unsaved changes?")) { e.target.value = PID; return; }
-  location = "/arrange?p=" + encodeURIComponent(e.target.value);
-};
+// switching projects leaves this page; unsaved canvas changes would be lost, so ask first
+$$("#project ul a").forEach(link => link.onclick = async e => {
+  $("#project").open = false;
+  if (link.classList.contains("on")) { e.preventDefault(); return; }
+  if (!dirty) return;
+  e.preventDefault();
+  if (await ask("Discard unsaved changes?", "The canvas has changes you haven't saved. Switching projects throws them away.", "Discard and switch")) {
+    dirty = false; // beforeunload would ask again
+    location = link.href;
+  }
+});
+// open menus close on a click elsewhere or Escape
+document.addEventListener("click", e => $$("details.menu[open], #needs[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }));
+document.addEventListener("keydown", e => { if (e.key === "Escape") $$("details.menu[open], #needs[open]").forEach(d => { d.open = false; d.querySelector("summary").focus(); }); });
 
 const dlg = $("#project-dialog"), pform = $("#project-form");
 let editing = null; // null = creating
@@ -357,6 +566,12 @@ $("#theme").onclick = () => {
 };
 
 $("#run-all").onclick = async () => {
+  const tops = [...agents.values()].filter(a => !parentOf(a.id) && summary.agents[a.id]?.queueWaiting);
+  if (!tops.length) { say("No top-level agent has goals to run. Select one and add a goal first.", true); return; }
+  const names = tops.map(a => a.name).join(", ");
+  if (!await ask(`Run all ${tops.length} top-level ${tops.length === 1 ? "agent" : "agents"}?`,
+    `${tops.map(a => `${a.name}: ${plural(summary.agents[a.id].queueWaiting, "goal")}`).join(", ")}. Managers plan for their teams, so every agent below them may run too.` +
+    (dirty ? " Unsaved changes on the canvas are saved first." : ""), "Run all", "Cancel", false)) return;
   try {
     if (dirty) await save();
     const r = await api("POST", `/api/projects/${PID}/run`);
@@ -384,15 +599,15 @@ $("#stats").onclick = async () => {
   const tiles = el("div", "tiles");
   [[`${s.done}/${s.goals}`, "goals done"], [pct(s.firstTry, s.done), "done on the first try"], [s.failed, "failed or blocked"],
    [s.runs, "agent runs"], [fmtDur(s.seconds * 1000), "agent time"], [fmtTok(s.tokens), "tokens"],
-   ["$" + s.cost.toFixed(2), "cost"], [s.done ? "$" + (s.cost / s.done).toFixed(2) : "–", "per finished goal"], [[el("b", "ok", "+" + s.adds), el("b", "bad", "−" + s.dels)], "lines changed"]]
+   [s.done ? fmtTok(Math.round(s.tokens / s.done)) : "–", "tokens per finished goal"], [[el("b", "ok", "+" + s.adds), el("b", "bad", "−" + s.dels)], "lines changed"]]
     .forEach(([v, l]) => { const d = el("div"); d.append(...(Array.isArray(v) ? v : [el("b", "", v)]), el("span", "", l)); tiles.append(d); });
   body.replaceChildren(tiles,
     el("h2", "", "By runtime"),
-    table(["runtime", "agents", "runs", "done", "failed", "time", "tokens", "cost", "$ / done"],
-      s.runtimes.map(r => [r.runtime, r.agents, r.runs, r.done, r.failed, fmtDur(r.seconds * 1000), fmtTok(r.tokens), "$" + r.cost.toFixed(2), r.done ? "$" + (r.cost / r.done).toFixed(2) : "–"])),
+    table(["runtime", "agents", "runs", "done", "failed", "time", "tokens", "tokens / done"],
+      s.runtimes.map(r => [r.runtime, r.agents, r.runs, r.done, r.failed, fmtDur(r.seconds * 1000), fmtTok(r.tokens), r.done ? fmtTok(Math.round(r.tokens / r.done)) : "–"])),
     el("h2", "", "By agent"),
-    table(["agent", "runtime", "status", "attempts", "runs", "time", "tokens", "cost", "lines"],
-      s.agents.map(a => [a.name, a.runtime, a.status, a.attempts, a.runs, fmtDur(a.seconds * 1000), fmtTok(a.tokens), "$" + a.cost.toFixed(2), `+${a.adds} −${a.dels}`])));
+    table(["agent", "runtime", "status", "attempts", "runs", "time", "tokens", "lines"],
+      s.agents.map(a => [a.name, a.runtime, a.status, a.attempts, a.runs, fmtDur(a.seconds * 1000), fmtTok(a.tokens), `+${a.adds} −${a.dels}`])));
 };
 
 /* ---------- inspector ---------- */
@@ -428,22 +643,99 @@ function fillParents(id) {
   sel.replaceChildren(new Option("nobody (top level)", ""));
   for (const a of agents.values()) if (a.id !== id && !isUnder(a.id, id)) sel.append(new Option(a.name, a.id));
   sel.value = parentOf(id) ?? "";
+  drawPick(sel);
 }
+
+// drawPick shows a native select as the app's own dropdown: the select stays (hidden) as the value,
+// and choosing an option sets it and fires its change event, so existing handlers keep working.
+function drawPick(sel) {
+  let menu = sel.nextElementSibling;
+  if (!menu?.classList.contains("pick")) {
+    menu = el("details", "menu pick");
+    menu.append(el("summary"), el("ul"));
+    sel.after(menu);
+    sel.hidden = true;
+  }
+  const cur = sel.selectedOptions[0];
+  const sum = menu.querySelector("summary");
+  sum.replaceChildren(el("span", "", cur?.text ?? ""), (() => {
+    const s = document.createElementNS(SVG, "svg"), p = document.createElementNS(SVG, "path");
+    s.setAttribute("viewBox", "0 0 24 24"); p.setAttribute("d", "M6 9l6 6 6-6"); s.append(p); return s;
+  })());
+  menu.querySelector("ul").replaceChildren(...[...sel.options].map(o => {
+    const li = el("li"), b = el("button", o.selected ? "on" : "", o.text);
+    b.type = "button";
+    b.onclick = () => {
+      menu.open = false;
+      if (sel.value === o.value) return;
+      sel.value = o.value;
+      drawPick(sel);
+      sel.dispatchEvent(new Event("change"));
+    };
+    li.append(b);
+    return li;
+  }));
+}
+
+$("#i-dir").onclick = async e => {
+  const path = e.currentTarget.dataset.path;
+  if (!path) return;
+  try { await navigator.clipboard.writeText(path); say("Copied " + path); }
+  catch { say("Couldn't copy the path", true); }
+};
+
+// selAgent is the selected agent's settings as last saved.
+let selAgent = null;
+
+// showApprove shows the plan-approval setting, in Settings and next to the goal, for managers only.
+function showApprove(on) {
+  const manager = selected && kidsOf(selected).length > 0;
+  aform.elements.approvePlan.checked = $("#g-approve").checked = on;
+  $("#a-approve-row").style.display = $("#g-approve-row").style.display = manager ? "flex" : "none";
+}
+
+// The Goal tab's checkbox saves the setting right away; the rest of the settings stay as saved.
+$("#g-approve").onchange = async e => {
+  const on = e.target.checked, id = selected;
+  try {
+    await api("PUT", `/api/agents/${encodeURIComponent(id)}`, { ...selAgent, approvePlan: on });
+    if (id !== selected) return;
+    selAgent.approvePlan = on;
+    agents.get(id).approvePlan = on;
+    aform.elements.approvePlan.checked = on;
+    status($("#g-msg"), on ? `${nameOf(id)} will show you its plan before its team runs.` : `${nameOf(id)}'s team starts as soon as it has a plan.`);
+  } catch (err) {
+    e.target.checked = !on;
+    status($("#g-msg"), err.message, true);
+  }
+};
 
 async function select(id) {
   let data;
-  try { data = await api("GET", `/api/agents/${encodeURIComponent(id)}`); }
-  catch (e) { say(dirty ? "Save the arrangement first" : e.message, true); return; }
+  const load = () => api("GET", `/api/agents/${encodeURIComponent(id)}`);
+  try { data = await load(); }
+  catch (e) {
+    // an agent just added to the canvas isn't saved yet: save the canvas, then open it
+    if (!dirty || !agents.has(id)) { say(e.message, true); return; }
+    try { await save(); data = await load(); } catch (e2) { say(e2.message, true); return; }
+  }
   selected = id;
   $$(".card.sel").forEach(c => c.classList.remove("sel"));
   cardOf(id)?.classList.add("sel");
   insp.hidden = false;
   const { agent: a, goal: g } = data;
+  selAgent = a;
   $("#i-name").textContent = a.name;
+  const d = $("#i-dir");
+  d.textContent = data.dir ? `(${data.dir})` : "";
+  d.dataset.path = data.dir;
+  d.title = data.dir ? `Worktree on branch ${data.branch}. Click to copy the path.` : "";
   for (const k of ["title", "body", "criteria", "checks"]) gform.elements[k].value = g[k];
+  showSuggestions($("#g-suggest"), gform.elements.checks);
   for (const k of ["name", "runtime", "model", "args", "prompt"]) aform.elements[k].value = a[k];
   aform.elements.tokenSoft.value = a.tokenSoft || "";
   aform.elements.tokenHard.value = a.tokenHard || "";
+  showApprove(a.approvePlan);
   colorChoice = a.color || "";
   if (agents.has(id)) agents.get(id).color = colorChoice;
   $("#a-color").value = colorChoice || roleColor(id);
@@ -453,6 +745,12 @@ async function select(id) {
   status($("#g-msg"), "");
   if (id !== revisingFor) { $("#r-change").value = ""; status($("#r-msg"), ""); } // a draft belongs to its agent
   showGoalState(g);
+  renderPlan();
+  $("#q-form").hidden = true;
+  $("#q-actions").hidden = false;
+  status($("#q-msg"), "");
+  $("#g-single").hidden = !parentOf(id); // a report's goal comes from its manager; top-level agents have a list
+  loadQueue();
   renderStats();
   showTab(tab);
 }
@@ -479,12 +777,10 @@ $("#a-parent").onchange = e => {
 
 function showGoalState(g) {
   const mgr = parentOf(selected), team = kidsOf(selected);
-  // once an agent has run (and isn't running), changes go through Request changes, not goal edits
-  $("#revise").hidden = !g.title || g.status === "idle" || BUSY.includes(g.status);
-  $("#r-hint").textContent = team.length
-    ? `${nameOf(selected)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(selected)} reviews and merges the changes and runs its checks again.`
-    : `${nameOf(selected)} keeps its work and changes only this, then its checks run again.`;
-  $("#i-run").title = team.length ? "Plan again from the goal and run the whole team" : "Run from the goal";
+  $("#i-run").title = !mgr ? "Run the goals in its list" : "Run from its goal";
+  const canContinue = team.length > 0 && ["blocked", "failed"].includes(g.status);
+  $("#i-continue").hidden = !canContinue;
+  $("#i-run").classList.toggle("primary", !canContinue); // one primary action at a time
   $("#g-hint").textContent = kidsOf(selected).length
     ? "Manager: Run plans subgoals for its team, runs them in parallel, reviews and merges their work, then runs these checks on the result."
     : mgr ? `${nameOf(mgr)} sets this goal when it plans; editing it here is fine, but the next plan replaces it.` : "";
@@ -498,15 +794,42 @@ function showGoalState(g) {
 // limitClass says whether a token count is past the agent's soft or hard limit.
 const limitClass = st => st.tokenHard && st.tokens >= st.tokenHard ? "over" : st.tokenSoft && st.tokens >= st.tokenSoft ? "warn" : "";
 
+// WORKING says what a busy agent is doing, for the banner at the top of its Goal tab.
+const WORKING = { starting: "is starting", running: "is working", verifying: "is running its checks", planning: "is planning for its team",
+                  waiting: "is waiting for its team", reviewing: "is reviewing its team's work",
+                  fixing: "is working out who fixes its failing checks" };
+
+function renderWorking(st) {
+  if (tab === "logs") renderLogNow();
+  const box = $("#g-working"), busy = st && BUSY.includes(st.status);
+  box.hidden = !busy;
+  if (!busy) return;
+  box.dataset.status = st.status;
+  $("#g-working-dot").dataset.status = st.status;
+  $("#g-working-text").textContent = `${nameOf(selected)} ${WORKING[st.status] ?? st.status}` + (st.since ? ` · ${fmtDur(Date.now() - st.since)}` : "");
+  $("#g-working-note").textContent = st.status === "planning" && agents.get(selected)?.approvePlan
+    ? "It's reading the repo and writing the plan. The plan shows up here for your approval; nothing runs until you approve it." : "";
+}
+
+// showStop enables Stop only while the selected agent is working or waiting on its plan.
+function showStop() {
+  const s = selected && summary.agents[selected]?.status;
+  const on = BUSY.includes(s) || s === "awaiting";
+  $("#i-stop").disabled = !on;
+  $("#i-stop").title = on ? "Stop it (and its team)" : "Nothing to stop: it isn't running";
+}
+
 function renderStats() {
   const st = selected && summary.agents[selected], box = $("#i-stats");
+  showStop();
+  renderWorking(st);
   if (!st) { box.replaceChildren(); return; }
   const parts = [el("span", "", st.status)];
   if (BUSY.includes(st.status) && st.since) parts.push(el("span", "", "working " + fmtDur(Date.now() - st.since)));
   const run = el("span", limitClass(st));
-  run.append("this run ", el("b", "", fmtTok(st.tokens) + " tok"), ` · $${st.cost.toFixed(2)}`);
+  run.append("this run ", el("b", "", fmtTok(st.tokens) + " tok"));
   if (st.tokenSoft || st.tokenHard) run.append(` (limits ${st.tokenSoft ? fmtTok(st.tokenSoft) : "–"} / ${st.tokenHard ? fmtTok(st.tokenHard) : "–"})`);
-  parts.push(run, el("span", "", `all time ${fmtTok(st.allTokens)} tok · $${st.allCost.toFixed(2)}`));
+  parts.push(run, el("span", "", `all time ${fmtTok(st.allTokens)} tok`));
   box.replaceChildren(...parts);
 }
 
@@ -545,14 +868,18 @@ aform.onsubmit = async e => {
   e.preventDefault();
   const f = aform.elements;
   const body = { name: f.name.value, runtime: f.runtime.value, model: f.model.value, args: f.args.value, prompt: f.prompt.value,
-                 tokenSoft: Number(f.tokenSoft.value) || 0, tokenHard: Number(f.tokenHard.value) || 0, color: colorChoice };
+                 tokenSoft: Number(f.tokenSoft.value) || 0, tokenHard: Number(f.tokenHard.value) || 0, color: colorChoice,
+                 approvePlan: f.approvePlan.checked };
   try {
+    if (dirty) await save(); // the canvas too: new agents, moves, renames
     await api("PUT", `/api/agents/${selected}`, body);
     const a = agents.get(selected);
-    Object.assign(a, { name: body.name, runtime: body.runtime, color: body.color });
+    Object.assign(a, { name: body.name, runtime: body.runtime, color: body.color, approvePlan: body.approvePlan });
+    Object.assign(selAgent, body);
+    $("#g-approve").checked = body.approvePlan;
     paintCard(a);
     $("#i-name").textContent = a.name;
-    status($("#a-msg"), dirty ? "Settings saved. The arrangement still has unsaved changes." : "Saved.");
+    status($("#a-msg"), "Saved.");
     refreshSummary();
   } catch (err) { status($("#a-msg"), err.message, true); }
 };
@@ -561,6 +888,7 @@ aform.onsubmit = async e => {
 const runMsg = (t, bad) => { status($("#i-msg"), t, bad); if (t) say(t, bad); };
 
 $("#i-run").onclick = async e => {
+  if (!parentOf(selected)) return openRunDialog();
   const btn = e.currentTarget, id = selected, f = gform.elements;
   const isManager = kidsOf(id).length > 0;
   // catch what the server would refuse, and point at the field to fix
@@ -578,14 +906,44 @@ $("#i-run").onclick = async e => {
     await api("PUT", `/api/agents/${id}/goal`, goalBody()); // Run uses what's in the form, saved or not
     await api("POST", `/api/agents/${id}/run`);
     setStatus(id, "starting");
-    runMsg(isManager ? `${nameOf(id)} is planning for its team.` : `${nameOf(id)} is working.`);
+    runMsg(!isManager ? `${nameOf(id)} is working.` : agents.get(id)?.approvePlan
+      ? `${nameOf(id)} is planning. You'll review the plan here before anyone on the team starts.`
+      : `${nameOf(id)} is planning for its team.`);
     refreshSummary();
     showTab("logs");
   } catch (err) { runMsg(err.message, true); }
   btn.disabled = false;
 };
 // Request changes: re-run an agent that already worked with what the user wants different.
+// Request changes: after a run, send the agent back to change what isn't right, keeping its work.
+// It's offered where results are read: on the latest finished goal, and after the latest run's log.
 let revisingFor = null;
+// canRevise says whether the agent has a result to change: it ran, and isn't working now.
+function canRevise(id) {
+  const st = summary.agents[id];
+  return !!st?.title && !["idle", "awaiting"].includes(st.status) && !BUSY.includes(st.status);
+}
+// reviseGoal is the finished goal the change is about, or null for the agent's current goal.
+let reviseGoal = null;
+function openRevise(item) {
+  const id = selected, team = kidsOf(id);
+  reviseGoal = item?.id ?? null;
+  $("#revise-dialog h3").textContent = item ? `Request changes to "${item.title}"` : `Request changes from ${nameOf(id)}`;
+  $("#r-hint").textContent = team.length
+    ? `${nameOf(id)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(id)} reviews and merges the changes and runs its checks again.`
+    : `${nameOf(id)} keeps its work and changes only this, then its checks run again.`;
+  status($("#r-msg"), "");
+  $("#revise-dialog").showModal();
+  $("#r-change").focus();
+}
+// a revise button, for the Goals list and the Logs tab
+function reviseButton(cls = "link", item) {
+  const b = el("button", cls, "Request changes");
+  b.type = "button";
+  b.title = "Not quite right? Say what should change; the agent keeps its work and changes only that";
+  b.onclick = () => openRevise(item);
+  return b;
+}
 $("#r-change").oninput = () => { revisingFor = selected; };
 $("#r-change").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#r-go").click(); } };
 $("#r-go").onclick = async e => {
@@ -595,10 +953,11 @@ $("#r-go").onclick = async e => {
   status($("#r-msg"), "Starting…");
   try {
     if (dirty) await save();
-    await api("POST", `/api/agents/${id}/revise`, { change });
+    await api("POST", `/api/agents/${id}/revise`, { change, goal: reviseGoal || 0 });
     $("#r-change").value = "";
     revisingFor = null;
     status($("#r-msg"), "");
+    $("#revise-dialog").close();
     setStatus(id, "starting");
     runMsg(kidsOf(id).length ? `${nameOf(id)} is passing your changes to its team.` : `${nameOf(id)} is making your changes.`);
     refreshSummary();
@@ -607,15 +966,30 @@ $("#r-go").onclick = async e => {
   btn.disabled = false;
 };
 
+// Continue: a blocked manager picks up where it stopped instead of planning and running everyone again.
+async function continueRun() {
+  const id = selected;
+  try {
+    if (dirty) await save();
+    await api("POST", `/api/agents/${encodeURIComponent(id)}/continue`);
+    setStatus(id, "starting");
+    runMsg(`${nameOf(id)} is continuing: finished reports keep their work, the others run again.`);
+    refreshSummary();
+    showTab("logs");
+  } catch (err) { runMsg(err.message, true); }
+}
+$("#i-continue").onclick = continueRun;
+
 $("#i-clone").onclick = async () => {
-  if (!confirm(`Add a copy of ${nameOf(selected)}? It gets the same settings and manager, but no goal.` + (dirty ? " Unsaved changes on the canvas are saved too." : ""))) return;
+  if (!await ask(`Add a copy of ${nameOf(selected)}?`, "It gets the same settings and manager, but no goal." + (dirty ? " Unsaved changes on the canvas are saved too." : ""),
+    "Add copy", "Cancel", false)) return;
   try {
     const { agent: src } = await api("GET", `/api/agents/${encodeURIComponent(selected)}`);
     const s = agents.get(selected), parent = parentOf(selected) ?? "";
     const { x, y } = parent ? slotUnder(parent) : { x: s.x + GAP_X, y: s.y };
     const a = addAgent(s.role, src.name + " copy", null, x, y, parent);
     Object.assign(a, { runtime: src.runtime, color: src.color,
-      defaults: { model: src.model, args: src.args, prompt: src.prompt, tokenSoft: src.tokenSoft, tokenHard: src.tokenHard } });
+      defaults: { model: src.model, args: src.args, prompt: src.prompt, tokenSoft: src.tokenSoft, tokenHard: src.tokenHard, approvePlan: src.approvePlan } });
     paintCard(a);
     await save();
     refreshCards();
@@ -624,49 +998,979 @@ $("#i-clone").onclick = async () => {
 };
 $("#i-stop").onclick = () => api("POST", `/api/agents/${selected}/stop`).then(() => runMsg("Stopping…")).catch(e => runMsg(e.message, true));
 
-/* ---------- logs ---------- */
+/* ---------- plan approval ---------- */
+
+// plans: manager id -> its draft plan waiting for the user's decision
+const plans = new Map();
+const baseTitle = document.title;
+const planItems = d => d.plan.subgoals || d.plan.changes || [];
+
+// loadPlan fetches the manager's waiting plan. Only the newest request per manager counts: an older
+// one can come back after it, e.g. "no plan" from just before a new plan was made.
+const planLoads = new Map();
+async function loadPlan(id) {
+  const n = (planLoads.get(id) ?? 0) + 1;
+  planLoads.set(id, n);
+  let d = null;
+  try { d = await api("GET", `/api/agents/${encodeURIComponent(id)}/plan`); } catch {}
+  if (planLoads.get(id) !== n) return;
+  d ? plans.set(id, d) : plans.delete(id);
+  planChanged(id);
+}
+
+function planChanged(id) {
+  showTabState();
+  refreshCards();
+  if (id === selected) renderPlan();
+}
+
+// showTabState puts the project's state in the browser tab, for someone working in another tab:
+// "2 need you · …", "Working · …", "Done · …", with a matching dot on the icon.
+let tabState = { needs: 0, running: 0 };
+function showTabState(needs = tabState.needs, running = tabState.running) {
+  tabState = { needs, running };
+  const tops = [...agents.values()].filter(a => !parentOf(a.id)).map(a => summary.agents[a.id]?.status);
+  const [label, color] = needs ? [`${needs} ${needs === 1 ? "needs" : "need"} you`, "failed"]
+    : running ? ["Working", "running"]
+    : tops.length && tops.some(s => s === "done") && tops.every(s => ["done", "idle", undefined].includes(s)) ? ["Done", "done"]
+    : ["", ""];
+  document.title = (label ? label + " · " : "") + baseTitle;
+  drawFavicon(color);
+}
+
+// drawFavicon is the app icon with a colored dot for the state, or the plain icon.
+const favicon = $('link[rel="icon"]'), faviconImg = new Image();
+let faviconColor = null;
+faviconImg.src = "/arranger.png";
+function drawFavicon(color) {
+  if (color === faviconColor) return;
+  faviconColor = color;
+  if (!color) { favicon.href = "/arranger.png"; return; }
+  const draw = () => {
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d");
+    if (faviconImg.complete && faviconImg.naturalWidth) g.drawImage(faviconImg, 0, 0, 64, 64);
+    g.beginPath();
+    g.arc(46, 46, 16, 0, 2 * Math.PI);
+    g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--" + color).trim() || "#d64545";
+    g.fill();
+    g.lineWidth = 5;
+    g.strokeStyle = "#fff";
+    g.stroke();
+    favicon.href = c.toDataURL("image/png");
+  };
+  faviconImg.complete ? draw() : faviconImg.addEventListener("load", draw, { once: true });
+}
+
+// syncPlans fetches drafts for managers that wait on the user and drops the ones that don't anymore.
+function syncPlans() {
+  for (const [id, s] of Object.entries(summary.agents)) if (s.status === "awaiting" && !plans.has(id)) loadPlan(id);
+  for (const id of [...plans.keys()]) if (summary.agents[id]?.status !== "awaiting") { plans.delete(id); planChanged(id); }
+}
+
+// planEdit is the plan as the user is editing it: report id -> {on, f}, for one draft.
+let planEdit = null;
+
+function renderPlan() {
+  const d = selected && plans.get(selected);
+  $("#plan-review").hidden = !d;
+  if (!d) { planEdit = null; return; }
+  if (planEdit?.draft !== d.id) {
+    const items = new Map();
+    for (const k of kidsOf(selected)) {
+      const x = planItems(d).find(i => i.agent === k.id);
+      items.set(k.id, { on: !!x, f: x ? { ...structuredClone(x), checks: x.checks || [] }
+        : d.kind === "revision" ? { agent: k.id, change: "", checks: [] } : { agent: k.id, title: "", body: "", criteria: "", checks: [] } });
+    }
+    planEdit = { draft: d.id, kind: d.kind, mgr: selected, items, open: planItems(d)[0]?.agent };
+    $("#pr-feedback").value = "";
+    status($("#pr-msg"), "");
+  }
+  drawPlan();
+}
+
+const WEAK_CHECK = /^(true|:|exit 0|pwd|ls(\s.*)?|echo(\s.*)?)$/;
+function checkWarnings(kind, checks) {
+  const ws = checks.filter(c => WEAK_CHECK.test(c)).map(c => `\`${c}\` can't fail, so it proves nothing.`);
+  if (kind === "plan" && !checks.length) ws.unshift("No checks: nothing can prove this is done.");
+  return ws;
+}
+const checkLines = v => v.split("\n").map(l => l.trim()).filter(Boolean);
+
+function drawPlan() {
+  const { kind, mgr, items } = planEdit, on = [...items.values()].filter(i => i.on).length;
+  const st = summary.agents[mgr];
+  $("#pr-title").textContent = kind === "revision" ? `${nameOf(mgr)}'s plan for your change` : `${nameOf(mgr)}'s plan`;
+  $("#pr-sub").textContent = `${on} of ${items.size} reports get work` + (st?.tokens ? ` · planning used ${fmtTok(st.tokens)} tokens` : "") +
+    ". Nothing runs until you approve.";
+  $("#pr-approve").disabled = on === 0;
+  $("#pr-approve").title = on ? "" : "Give at least one report work, or cancel.";
+  $("#pr-items").replaceChildren(...[...items].map(([id, it]) => it.on ? planCard(id, it) : leftOut(id, it)));
+}
+
+// planCard is one report's part of the plan, editable in place.
+function planCard(id, it) {
+  const det = el("details", "pr-item"), sum = el("summary"), f = it.f, team = kidsOf(id).length;
+  det.open = planEdit.open === id;
+  det.ontoggle = () => { if (det.open) planEdit.open = id; };
+  const what = el("span", "what");
+  const showWhat = () => what.textContent = (team ? `manager, ${team} reports · ` : "") + (planEdit.kind === "revision" ? f.change : f.title);
+  showWhat();
+  const skip = el("button", "", "Skip");
+  skip.type = "button";
+  skip.title = "Leave this report out of this run; its current goal stays";
+  skip.onclick = e => { e.preventDefault(); it.on = false; drawPlan(); };
+  sum.append(el("span", "who", nameOf(id)), what, skip);
+
+  const fields = el("div", "fields"), warn = el("div");
+  const showWarn = () => warn.replaceChildren(...checkWarnings(planEdit.kind, f.checks).map(w => el("p", "warn", "⚠ " + w)));
+  const field = (label, key, tag = "textarea", cls = "") => {
+    const input = el(tag, cls);
+    input.value = key === "checks" ? f.checks.join("\n") : f[key] ?? "";
+    input.oninput = () => {
+      if (key === "checks") { f.checks = checkLines(input.value); showWarn(); } else { f[key] = input.value; showWhat(); }
+    };
+    fields.append(el("label", "", label), input);
+  };
+  if (planEdit.kind === "revision") {
+    field("Change", "change");
+    field("New checks (optional), one per line", "checks", "textarea", "mono");
+  } else {
+    field("Goal", "title", "input");
+    field("Details", "body");
+    field("Acceptance criteria", "criteria");
+    field("Checks: one shell command per line, all must exit 0", "checks", "textarea", "mono");
+  }
+  fields.append(warn);
+  showWarn();
+  det.append(sum, fields);
+  return det;
+}
+
+// leftOut is a report the plan gives no work, with a way to bring it in.
+function leftOut(id, it) {
+  const row = el("div", "pr-item out"), noGoal = planEdit.kind === "revision" && !summary.agents[id]?.title;
+  const add = el("button", "", "Add");
+  add.type = "button";
+  add.disabled = noGoal;
+  add.onclick = () => { it.on = true; planEdit.open = id; drawPlan(); $("#pr-items details[open] input, #pr-items details[open] textarea")?.focus(); };
+  row.append(el("span", "who", nameOf(id)), el("span", "what", noGoal ? "no goal yet, so no work to change" : planEdit.kind === "revision" ? "no change" : "not in this plan"), add);
+  return row;
+}
+
+async function decidePlan(btn, body, working, done) {
+  const mgr = planEdit.mgr, draft = planEdit.draft;
+  btn.disabled = true;
+  status($("#pr-msg"), working);
+  try {
+    await api("POST", `/api/agents/${encodeURIComponent(mgr)}/plan`, { draft, ...body });
+    if (plans.get(mgr)?.id === draft) { plans.delete(mgr); planChanged(mgr); } // a new plan may already be here
+    planLoads.set(mgr, (planLoads.get(mgr) ?? 0) + 1); // and a request still in flight must not bring the old one back
+    runMsg(done);
+    refreshSummary();
+  } catch (err) {
+    status($("#pr-msg"), err.message, true);
+    loadPlan(mgr); // it may have been decided elsewhere, or replaced; edits to the same draft are kept
+  }
+  btn.disabled = false;
+}
+
+$("#pr-approve").onclick = e => {
+  const on = [...planEdit.items.values()].filter(i => i.on).map(i => i.f);
+  const body = planEdit.kind === "revision" ? { action: "approve", changes: on } : { action: "approve", subgoals: on };
+  decidePlan(e.currentTarget, body, "Approving…", `${nameOf(planEdit.mgr)} is running its team.`);
+};
+$("#pr-replan").onclick = e => {
+  decidePlan(e.currentTarget, { action: "replan", feedback: $("#pr-feedback").value.trim() }, "Asking for a new plan…", `${nameOf(planEdit.mgr)} is planning again.`);
+};
+$("#pr-cancel").onclick = async e => {
+  const btn = e.currentTarget;
+  if (!await ask(`Cancel ${nameOf(planEdit.mgr)}'s plan?`, "The run stops and no report's goal changes.", "Cancel plan", "Keep it")) return;
+  decidePlan(btn, { action: "cancel" }, "Cancelling…", `${nameOf(planEdit.mgr)}'s plan was cancelled.`);
+};
+
+/* ---------- queue: goals a top-level agent runs one after another ---------- */
+
+let queue = null, editingItem = null;
+const qURL = (path = "") => `/api/agents/${encodeURIComponent(selected)}/queue${path}`;
+const plainCount = (s, one) => { const n = lines(s).length; return `${n} ${one}${n === 1 ? "" : "s"}`; };
+const lines = s => (s || "").split("\n").map(l => l.trim()).filter(Boolean);
+
+// refreshGoalFields shows the agent's current goal in the form after its queue moved on,
+// unless the user is typing in it.
+async function refreshGoalFields() {
+  if (gform.contains(document.activeElement) && !$("#queue").contains(document.activeElement)) return;
+  const id = selected, g = (await api("GET", `/api/agents/${encodeURIComponent(id)}`).catch(() => null))?.goal;
+  if (!g || id !== selected) return;
+  for (const k of ["title", "body", "criteria", "checks"]) gform.elements[k].value = g[k];
+}
+
+async function loadQueue() {
+  const box = $("#queue"), id = selected;
+  box.hidden = !id || !!parentOf(id); // reports get their goals from their manager
+  if (box.hidden) return;
+  try { queue = await api("GET", qURL()); } catch { box.hidden = true; return; }
+  if (id === selected) renderQueue();
+}
+
+function renderQueue() {
+  const waiting = queue.items.filter(i => i.status === "queued" || i.status === "running");
+  const finished = queue.items.filter(i => i.status !== "queued" && i.status !== "running");
+  const running = waiting.find(i => i.status === "running");
+  const st = summary.agents[selected];
+  const left = waiting.filter(i => i.status === "queued").length;
+  $("#q-state").textContent = running ? `working on goal ${finished.filter(i => i.status !== "skipped").length + 1} of ${queue.items.filter(i => i.status !== "skipped").length}`
+    : st?.queuePaused ? `stopped at "${st.queuePaused}": it failed. Run goes on with the rest.`
+    : left ? `${left} to run` : "";
+  $("#q-hint").hidden = queue.items.length > 0;
+  // one list in the order the goals run: finished ones where they were, then the one running, then the rest
+  const ran = [...finished].sort((a, b) => a.finished - b.finished || a.id - b.id);
+  const rows = [...ran.map(doneRow), ...waiting.map(queueRow)];
+  $("#q-items").replaceChildren(...(rows.length ? rows : [el("li", "empty hint", "No goals yet. Add one, then press Run.")]));
+}
+
+const GRIP = "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01";
+function queueRow(it) {
+  const li = el("li", "qi");
+  li.dataset.id = it.id;
+  li.dataset.status = it.status;
+  const running = it.status === "running";
+  if (!running) {
+    const g = document.createElementNS(SVG, "svg"), p = document.createElementNS(SVG, "path");
+    g.setAttribute("viewBox", "0 0 24 24"); g.setAttribute("class", "grip li"); p.setAttribute("d", GRIP); g.append(p);
+    li.append(g);
+    li.draggable = true;
+  }
+  const t = el("span", "qt", it.title);
+  t.title = it.title;
+  li.append(t, el("span", "qm", running ? "running" : plainCount(it.checks, "check")));
+  if (!running) li.append(itemMenu(it));
+  return li;
+}
+
+function itemMenu(it) {
+  const d = el("details", "menu"), ul = el("ul");
+  d.append(el("summary", "", "···"), ul);
+  d.querySelector("summary").title = "More";
+  const act = (label, fn, cls = "") => { const b = el("button", cls, label); b.type = "button"; b.onclick = e => { e.preventDefault(); d.open = false; fn(); }; const li = el("li"); li.append(b); ul.append(li); };
+  act("Edit", () => openItemForm(it));
+  act("Run next", () => moveToFront(it.id));
+  act("Skip", () => queueCall("POST", `/${it.id}/skip`, null, "Skipped."));
+  act("Remove", async () => { if (await ask(`Remove "${it.title}" from the queue?`, "", "Remove")) queueCall("DELETE", `/${it.id}`, null, "Removed."); }, "danger");
+  return d;
+}
+
+function doneRow(it) {
+  const li = el("li", "qi fin");
+  li.dataset.status = it.status;
+  const t = el("span", "qt", it.title);
+  t.title = it.title;
+  const word = { done: "done", failed: "failed", blocked: "needs you", stopped: "stopped", skipped: "skipped" }[it.status] || it.status;
+  const mark = it.status === "done" ? icon("ok", "ok") : ["failed", "blocked"].includes(it.status) ? icon("bad", "bad") : icon("bad");
+  li.append(mark, t, el("span", "qm", word + (it.finished ? " · " + clock(it.finished) : "")));
+  const acts = el("span", "qa"); // on a line of their own, so a narrow panel never pushes them out of view
+  if (it.session) {
+    const b = el("button", "link", "View log");
+    b.type = "button";
+    b.onclick = () => { logState.focus = it.session; showTab("logs"); };
+    acts.append(b);
+  }
+  if (it.status !== "skipped" && canRevise(selected)) acts.append(reviseButton("link", it));
+  li.append(acts);
+  const again = el("button", "link", "Add again");
+  again.type = "button";
+  again.title = "Put a copy of this goal back in the list, to run it again";
+  again.onclick = () => queueCall("POST", "", { title: it.title, body: it.body, criteria: it.criteria, checks: it.checks }, "Added again. Press Run to run it.");
+  acts.append(again);
+  return li;
+}
+
+async function queueCall(method, path, body, done) {
+  try {
+    await api(method, qURL(path), body);
+    status($("#q-msg"), done || "");
+    await loadQueue();
+    refreshSummary();
+  } catch (err) { status($("#q-msg"), err.message, true); }
+}
+
+function moveToFront(id) {
+  const ids = queue.items.filter(i => i.status === "queued").map(i => i.id);
+  queueCall("POST", "/order", { ids: [id, ...ids.filter(x => x !== id)] }, "It runs next.");
+}
+
+// add or edit a goal in the queue, in the form under the list
+function openItemForm(it) {
+  editingItem = it;
+  $("#q-form").hidden = false;
+  $("#qf-title").value = it?.title ?? "";
+  $("#qf-body").value = it?.body ?? "";
+  $("#qf-criteria").value = it?.criteria ?? "";
+  $("#qf-checks").value = it?.checks ?? gform.elements.checks.value; // the agent's own checks are a good start
+  $("#qf-save").textContent = it ? "Save goal" : "Add goal";
+  showSuggestions($("#qf-suggest"), $("#qf-checks"));
+  $("#q-actions").hidden = true;
+  $("#qf-title").focus();
+}
+$("#q-add").onclick = () => openItemForm(null);
+$("#qf-cancel").onclick = () => { $("#q-form").hidden = true; $("#q-actions").hidden = false; editingItem = null; };
+$("#qf-save").onclick = async () => {
+  const body = { title: $("#qf-title").value, body: $("#qf-body").value, criteria: $("#qf-criteria").value, checks: $("#qf-checks").value };
+  try {
+    if (editingItem) await api("PUT", qURL(`/${editingItem.id}`), body);
+    else await api("POST", qURL(), body);
+    $("#q-form").hidden = true;
+    $("#q-actions").hidden = false;
+    status($("#q-msg"), editingItem ? "Saved." : "Added. Press Run when your goals are ready.");
+    editingItem = null;
+    await loadQueue();
+    refreshSummary();
+  } catch (err) { status($("#q-msg"), err.message, true); }
+};
+// Enter in the queue's fields must not submit the goal form around them
+$("#queue").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches("input")) { e.preventDefault(); if (e.target.id === "qf-title") $("#qf-save").click(); } });
+
+// Run on a top-level agent shows the goals it's about to work through, then starts them.
+async function openRunDialog() {
+  const id = selected;
+  try { queue = await api("GET", qURL()); } catch (err) { runMsg(err.message, true); return; }
+  const todo = queue.items.filter(i => i.status === "queued");
+  if (!todo.length) {
+    showTab("goal");
+    runMsg(`${nameOf(id)} has no goals to run. Add one first.`, true);
+    openItemForm(null);
+    return;
+  }
+  $("#run-dialog h3").textContent = `Run ${todo.length === 1 ? "this goal" : `these ${todo.length} goals`}?`;
+  $("#run-goals").replaceChildren(...todo.map(it => {
+    const li = el("li"), cs = lines(it.checks);
+    li.append(el("b", "", it.title));
+    const checks = el("span", "rg");
+    checks.append(`${cs.length === 1 ? "Check" : `${cs.length} checks`}: `, ...cs.slice(0, 3).flatMap((c, i) => [i ? ", " : "", el("code", "", c)]), cs.length > 3 ? ` and ${cs.length - 3} more` : "");
+    li.append(checks);
+    const body = (it.body || "").trim().split("\n")[0];
+    if (body) li.append(el("span", "rg", body.length > 140 ? body.slice(0, 140) + "…" : body));
+    return li;
+  }));
+  $$('#run-form input[name="run-onfail"]').forEach(r => r.checked = r.value === queue.onFail);
+  $("#run-go").textContent = todo.length === 1 ? "Run" : `Run ${todo.length} goals`;
+  $("#run-dialog").showModal();
+}
+$("#run-form").onsubmit = async e => {
+  if (e.submitter?.value !== "run") return;
+  e.preventDefault();
+  const id = selected, onFail = $('#run-form input[name="run-onfail"]:checked')?.value || "pause";
+  $("#run-go").disabled = true;
+  try {
+    if (dirty) await save();
+    if (onFail !== queue.onFail) await api("PUT", qURL("/settings"), { onFail });
+    await api("POST", qURL("/start"));
+    $("#run-dialog").close();
+    setStatus(id, "starting");
+    runMsg(`${nameOf(id)} is working on its goals.`);
+    loadQueue();
+    refreshSummary();
+    showTab("logs");
+  } catch (err) { runMsg(err.message, true); $("#run-dialog").close(); }
+  $("#run-go").disabled = false;
+};
+
+// drag a waiting goal to reorder
+let qDragged = null;
+$("#q-items").addEventListener("dragstart", e => { qDragged = e.target.closest(".qi"); qDragged?.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; e.stopPropagation(); });
+$("#q-items").addEventListener("dragover", e => {
+  if (!qDragged) return;
+  e.preventDefault();
+  const over = e.target.closest(".qi");
+  if (!over || over === qDragged || over.dataset.status !== "queued") return; // finished and running goals stay put
+  const r = over.getBoundingClientRect();
+  over.parentNode.insertBefore(qDragged, e.clientY < r.top + r.height / 2 ? over : over.nextSibling);
+});
+$("#q-items").addEventListener("dragend", e => {
+  e.stopPropagation();
+  if (!qDragged) return;
+  qDragged.classList.remove("dragging");
+  qDragged = null;
+  const ids = $$("#q-items .qi").filter(li => li.dataset.status === "queued").map(li => +li.dataset.id);
+  queueCall("POST", "/order", { ids });
+});
+
+/* ---------- get started: agent tools, starter teams, checks for this repo ---------- */
+
+let setupData = null;
+async function loadSetup() {
+  try { setupData = await api("GET", `/api/setup?project=${encodeURIComponent(PID)}`); } catch { setupData = null; }
+  return setupData;
+}
+
+function copyButton(text) {
+  const b = el("button", "", "Copy");
+  b.type = "button";
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select it"; }
+    setTimeout(() => b.textContent = "Copy", 1500);
+  };
+  return b;
+}
+function cmdRow(label, text) {
+  const r = el("div", "su-cmd");
+  r.append(el("span", "", label), el("code", "", text), copyButton(text));
+  return r;
+}
+
+function renderSetup() {
+  const d = setupData;
+  if (!d) { $("#su-tools").replaceChildren(el("p", "note bad", "Couldn't check this machine.")); return; }
+  $("#su-tools").replaceChildren(...d.tools.map(t => {
+    const row = el("div", "su-tool"), state = el("span", t.installed ? "ok" : "no", t.installed ? `Installed${t.version ? " · " + t.version : ""}` : "Not installed");
+    const cmds = el("div", "cmds");
+    if (!t.installed) cmds.append(cmdRow("install", t.install));
+    cmds.append(cmdRow("sign in", t.login));
+    const docs = el("a", "", "Docs");
+    docs.href = t.docs; docs.target = "_blank"; docs.rel = "noopener";
+    const head = el("span");
+    head.append(state, " · ", docs);
+    row.append(el("span", "name", t.runtime), head, cmds);
+    return row;
+  }));
+  $("#su-teams").replaceChildren(...d.templates.map(t => {
+    const card = el("div", "su-team"), add = el("button", "primary", "Add to canvas"), row = el("div", "row");
+    add.type = "button";
+    add.title = "Add this team next to the agents already on the canvas";
+    add.onclick = () => addTemplate(t);
+    const only = el("button", "", "Replace canvas");
+    only.type = "button";
+    only.title = "Remove every agent on the canvas and use only this team";
+    only.onclick = () => replaceWithTemplate(t);
+    row.append(add, only);
+    if (!t.builtIn) {
+      const del = el("button", "danger", "Delete");
+      del.type = "button";
+      del.onclick = async () => {
+        if (!await ask(`Delete the "${t.name}" template?`, "Teams already on a canvas stay.", "Delete")) return;
+        try { await api("DELETE", `/api/templates/${encodeURIComponent(t.id)}`); await loadSetup(); renderSetup(); } catch (err) { status($("#su-msg"), err.message, true); }
+      };
+      row.append(del);
+    }
+    card.append(el("b", "", t.name), el("p", "hint", t.about || `${t.agents.length} agents`), el("span", "hint", t.agents.map(a => a.name).join(", ")), row);
+    return card;
+  }));
+  $("#su-checks").replaceChildren(...(d.checks.length ? d.checks.map(c => { const s = el("span", "", c.cmd); s.append(el("i", "", c.why)); return s; })
+    : [el("p", "hint", window.PROJECT?.repo ? "No build files found to suggest checks from. Write your own: any shell command that exits 0 when the goal is met." : "Set this project's git repository (⚙ in the header) to get suggestions.")]));
+}
+
+async function openSetup() {
+  status($("#su-msg"), "");
+  $("#su-tools").replaceChildren(el("p", "hint", "Checking this machine…"));
+  $("#setup-dialog").showModal();
+  await loadSetup();
+  renderSetup();
+}
+$("#get-started").onclick = openSetup;
+$("#empty-start").onclick = openSetup;
+
+// addTemplate drops a team onto the canvas, to the right of what's there, and saves it.
+async function addTemplate(t) {
+  let x0 = PAD, y0 = PAD;
+  for (const a of agents.values()) x0 = Math.max(x0, a.x + (a.el?.offsetWidth || 210) + GAP_X / 2);
+  const ids = {};
+  for (const ta of t.agents) {
+    const a = addAgent(ta.role, ta.name, TYPES.get(ta.role) || null, x0 + ta.x, y0 + ta.y, ta.parent ? ids[ta.parent] : "");
+    ids[ta.key] = a.id;
+    Object.assign(a, { runtime: ta.runtime || a.runtime, color: ta.color || "" });
+    a.defaults = { ...(a.defaults || {}), ...(ta.model ? { model: ta.model } : {}), ...(ta.args ? { args: ta.args } : {}), ...(ta.prompt ? { prompt: ta.prompt } : {}) };
+    paintCard(a);
+  }
+  drawLinks();
+  showEmptyCanvas();
+  try {
+    await save();
+    $("#setup-dialog").close();
+    say(`Added the ${t.name} team`);
+    main.scrollTo({ left: Math.max(0, x0 - PAD), top: 0, behavior: "smooth" });
+  } catch (err) { status($("#su-msg"), err.message, true); }
+}
+
+// replaceWithTemplate clears the canvas and puts only this team on it, after the user confirms.
+async function replaceWithTemplate(t) {
+  const all = [...agents.values()];
+  if (!all.length) return addTemplate(t);
+  const busy = all.filter(a => BUSY.includes(a.el.dataset.status));
+  if (busy.length) { status($("#su-msg"), `${names(busy.map(a => a.name))} ${busy.length === 1 ? "is" : "are"} running; stop ${busy.length === 1 ? "it" : "them"} first.`, true); return; }
+  const withWork = all.filter(a => summary.agents[a.id]?.adds || summary.agents[a.id]?.dels);
+  if (!await ask(`Replace the canvas with ${t.name}?`,
+    `This removes the ${all.length === 1 ? "agent" : `${all.length} agents`} on it now (${names(all.map(a => a.name))}).` +
+    (withWork.length ? ` Their work and branches are deleted when it saves; merge first if you want to keep ${withWork.length === 1 ? "it" : "them"}.` : ""),
+    "Replace canvas")) return;
+  closeInspector();
+  setPicked([]);
+  for (const a of all) { a.el.remove(); agents.delete(a.id); }
+  await addTemplate(t); // places it at the top left and saves
+}
+
+$("#su-save").onclick = async () => {
+  const name = $("#su-name").value.trim();
+  if (!name) { status($("#su-msg"), "Give the template a name.", true); $("#su-name").focus(); return; }
+  if (!agents.size) { status($("#su-msg"), "The canvas is empty; add agents first.", true); return; }
+  try {
+    if (dirty) await save();
+    const list = [...agents.values()];
+    const minX = Math.min(...list.map(a => a.x)), minY = Math.min(...list.map(a => a.y));
+    const full = await Promise.all(list.map(a => api("GET", `/api/agents/${encodeURIComponent(a.id)}`).then(r => r.agent)));
+    // parents first, so a template always builds top-down
+    const depth = a => { let n = 0; for (let p = parentOf(a.id); p; p = parentOf(p)) n++; return n; };
+    const rows = list.map((a, i) => ({ a, f: full[i] })).sort((x, y) => depth(x.a) - depth(y.a));
+    await api("POST", "/api/templates", { name, agents: rows.map(({ a, f }) => ({
+      key: a.id, name: a.name, role: a.role, parent: parentOf(a.id) || "", runtime: f.runtime, model: f.model, args: f.args,
+      prompt: f.prompt, color: f.color, x: a.x - minX, y: a.y - minY })) });
+    $("#su-name").value = "";
+    status($("#su-msg"), `Saved "${name}".`);
+    await loadSetup();
+    renderSetup();
+  } catch (err) { status($("#su-msg"), err.message, true); }
+};
+
+// showEmptyCanvas invites a new user to start from a team when the canvas is empty.
+function showEmptyCanvas() { $("#empty-canvas").hidden = agents.size > 0; }
+
+// suggested checks under each Checks box: one click adds the line
+function showSuggestions(box, textarea) {
+  const cs = setupData?.checks || [];
+  if (!cs.length) { box.replaceChildren(); return; }
+  const have = new Set(lines(textarea.value));
+  const todo = cs.filter(c => !have.has(c.cmd));
+  if (!todo.length) { box.replaceChildren(); return; }
+  box.replaceChildren("Suggested:", ...todo.map(c => {
+    const b = el("button", "", c.cmd);
+    b.type = "button";
+    b.title = `Add this check: ${c.why}`;
+    b.onclick = () => {
+      textarea.value = (textarea.value.trim() ? textarea.value.trimEnd() + "\n" : "") + c.cmd;
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      showSuggestions(box, textarea);
+    };
+    return b;
+  }));
+}
+$("#qf-checks").addEventListener("input", () => showSuggestions($("#qf-suggest"), $("#qf-checks")));
+gform.elements.checks.addEventListener("input", () => showSuggestions($("#g-suggest"), gform.elements.checks));
+
+/* ---------- logs: one section per run, outcome and reason first ---------- */
 
 const log = $("#log"), logPane = $('[data-pane="logs"]');
 
-function evRow(e) {
-  const row = el("div", "ev");
-  row.dataset.kind = e.kind;
-  row.append(el("span", "t", time(e.ts)), el("span", "k", e.kind), el("span", "x", e.text || "·"));
-  if (e.raw) {
-    row.dataset.raw = "";
-    row.raw = e.raw;
-    if ($("#raw").checked) row.append(el("pre", "", e.raw));
-  }
-  return row;
-}
-log.onclick = e => {
-  const row = e.target.closest(".ev[data-raw]");
-  if (!row) return;
-  const pre = row.querySelector("pre");
-  pre ? pre.remove() : row.append(el("pre", "", row.raw));
+// line icons, drawn like the sidebar's (no emoji)
+const ICONS = {
+  msg: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12Z",
+  tool: "M4 17l6-5-6-5M12 19h8",
+  file: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M9 15l2 2 4-4",
+  ok: "M20 6 9 17l-5-5",
+  bad: "M18 6 6 18M6 6l12 12",
+  error: "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
+  plan: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
+  verdict: "M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM18 9a9 9 0 0 1-9 9",
+  you: "M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z",
+  flag: "M4 22V4M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1",
 };
-$("#raw").onchange = loadLogs;
+function icon(name, cls = "") {
+  const s = document.createElementNS(SVG, "svg"), p = document.createElementNS(SVG, "path");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", "li " + cls);
+  s.setAttribute("aria-hidden", "true");
+  p.setAttribute("d", ICONS[name]);
+  s.append(p);
+  return s;
+}
+
+// logState holds the selected agent's log, and how the user is looking at it.
+const logState = { agent: null, events: [], runs: new Map(), open: new Map(), filter: "all", q: "" };
+
+const isTerminalDone = e => e.kind === "done" && /^(all \d+ checks? passed|team work merged)/.test(e.text);
+const isJSON = t => /^\s*\{[\s\S]*\}\s*$/.test(t || "");
+const attemptMsg = e => e.kind === "msg" && /^attempt (\d+)\/(\d+) with /.exec(e.text || "");
+const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+const names = xs => xs.length <= 3 ? xs.join(", ") : `${xs.slice(0, 3).join(", ")} and ${xs.length - 3} more`;
+const clock = ts => { const d = new Date(ts); return d.toDateString() === new Date().toDateString() ? time(ts).slice(0, 5) : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + time(ts).slice(0, 5); };
+const since = (ts, t0) => { const s = Math.max(0, Math.round((ts - t0) / 1000)); return `+${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+// check parses a check event: "✓ cmd" or "✗ cmd (exit status 1)".
+function check(e) {
+  const ok = e.text.startsWith("✓");
+  let cmd = e.text.slice(2);
+  if (!ok) { const i = cmd.lastIndexOf(" ("); if (i > 0) cmd = cmd.slice(0, i); }
+  return { ok, cmd, out: e.raw || "" };
+}
+// keyLine picks the line of a failure's output that says what went wrong.
+function keyLine(out) {
+  const ls = out.split("\n").map(l => l.trim()).filter(Boolean);
+  return ls.find(l => /error|fail|panic|undefined|exception|expected|not found|cannot|denied|no such/i.test(l) && !/^ok\b/.test(l)) || ls.at(-1) || "";
+}
+const fileOf = e => (e.text || "").replace(/^\S+\s+/, "");
+const fileVerb = e => ({ write: "Wrote", create_file: "Created", delete: "Deleted" })[(e.text || "").split(" ")[0].toLowerCase()] || "Edited";
+
+// sessionsOf splits the events into runs: one per press of Run (or a manager starting this agent).
+// Events from before runs were recorded are split at requests, results and long pauses.
+function sessionsOf(events) {
+  const out = [];
+  let cur = null;
+  const attemptOfRun = new Map();
+  for (const e of events) {
+    const m = attemptMsg(e);
+    if (m) attemptOfRun.set(e.run, +m[1]);
+    const legacy = !e.session;
+    const fresh = !cur || (legacy
+      ? !cur.legacy || e.kind === "request" || cur.ended || e.ts - cur.last > 10 * 60e3
+      : cur.key !== e.session);
+    if (fresh) out.push(cur = { key: legacy ? "L" + e.id : e.session, legacy, events: [], ended: false, first: e.ts });
+    e.att = e.attempt || attemptOfRun.get(e.run) || 0;
+    cur.events.push(e);
+    cur.last = e.ts;
+    if (isTerminalDone(e) || e.kind === "error" && /^(stopped by user|you cancelled the plan|needs you|checks still failing|merged work)/.test(e.text)) cur.ended = true;
+  }
+  return out;
+}
+
+// outcome says how a run ended, in one word and one sentence, with the reason for a failure.
+function outcome(g, latest) {
+  const st = latest ? summary.agents[logState.agent]?.status : null;
+  if (st === "awaiting") return { state: "awaiting", word: "Waiting for you", line: "The plan is ready. Approve it in the Goal tab." };
+  const attempts = Math.max(0, ...g.events.map(e => e.att));
+  const manager = kidsOf(logState.agent).length > 0;
+  if (latest && BUSY.includes(st)) return { state: "running", word: "Working", line: attempts && !manager ? `Working on attempt ${attempts} of 3.` : `${nameOf(logState.agent)} ${WORKING[st] ?? "is working"}.` };
+  for (let i = g.events.length - 1; i >= 0; i--) {
+    const e = g.events[i];
+    if (isTerminalDone(e)) {
+      const n = /all (\d+)/.exec(e.text)?.[1];
+      const checks = +n === 1 ? "its check" : `all ${n} checks`;
+      return { by: e, state: "done", word: "Done", line: e.text.startsWith("team")
+        ? `Done. The team's work is merged and ${checks} passed.`
+        : `Done${attempts > 1 ? ` on attempt ${attempts}` : ""}. ${checks[0].toUpperCase() + checks.slice(1)} passed.` };
+    }
+    if (e.kind !== "error") continue;
+    if (/^stopped by user/.test(e.text)) return { by: e, state: "stopped", word: "Stopped", line: "You stopped it." };
+    if (/^you cancelled the plan/.test(e.text)) return { by: e, state: "stopped", word: "Cancelled", line: "You cancelled the plan." };
+    if (/^the plan wasn't approved/.test(e.text)) return { by: e, state: "stopped", word: "Stopped", line: "The plan wasn't approved in time." };
+    if (/^needs you: /.test(e.text)) return { by: e, state: "blocked", word: "Needs you", line: e.text.replace(/^needs you: /, "").split("\n")[0].replace(/^./, c => c.toUpperCase()) + "." };
+    return { by: e, state: "failed", word: "Failed", line: failureLine(g, attempts, e) };
+  }
+  if (g.events.some(e => e.kind === "merge")) return { state: "other", word: "Merged", line: "" };
+  if (g.events.some(e => /^synced with/.test(e.text))) return { state: "other", word: "Synced", line: "" };
+  return { state: "stopped", word: "Ended", line: "It ended without a result." };
+}
+// failureLine puts the reason first: the check that still fails and its telling line.
+function failureLine(g, attempts, err) {
+  const last = lastChecks(g).filter(c => !c.ok);
+  const head = `Failed${attempts > 1 ? ` after ${attempts} attempts` : ""}`;
+  if (last.length) return [`${head}: `, el("code", "", last[0].cmd), last.length > 1 ? ` and ${plural(last.length - 1, "other check")} still fail.` : " still fails."];
+  return `${head}: ${err.text.split("\n")[0]}`;
+}
+// lastChecks are the checks of the run's last round (worker attempt or manager verify).
+function lastChecks(g) {
+  const cs = g.events.filter(e => e.kind === "check");
+  if (!cs.length) return [];
+  const lastAtt = cs.at(-1).att, round = [];
+  for (let i = cs.length - 1; i >= 0 && cs[i].att === lastAtt; i--) {
+    round.unshift(check(cs[i]));
+    if (i > 0 && cs[i].id - cs[i - 1].id > 1) break; // an earlier round of the same attempt number
+  }
+  return round;
+}
+// activity says what the run did, in one line.
+function activity(g) {
+  const ev = g.events, parts = [];
+  const plans = ev.filter(e => e.kind === "plan" && !/^plan ready/.test(e.text));
+  const verdicts = ev.filter(e => e.kind === "verdict");
+  if (plans.length) parts.push(`Gave work to ${names([...new Set(plans.map(e => e.text.split(" → ")[0]))])}`);
+  const acc = verdicts.filter(e => e.text.startsWith("✓")).map(e => e.text.replace(/^✓ accepted and merged |^✓ /, ""));
+  const rej = verdicts.filter(e => e.text.startsWith("✗")).map(e => e.text.replace(/^✗ rejected /, "").split(":")[0]);
+  if (acc.length) parts.push(`merged ${names(acc)}`);
+  if (rej.length) parts.push(`sent back ${names(rej)}`);
+  const fixes = ev.filter(e => e.kind === "warn" && /fails my checks/.test(e.text)).length;
+  if (fixes) parts.push(`${plural(fixes, "fix round")}`);
+  const files = [...new Set(ev.filter(e => e.kind === "file").map(fileOf))];
+  const cmds = ev.filter(e => e.kind === "tool" && /^bash /i.test(e.text)).length;
+  const reads = ev.filter(e => e.kind === "tool" && !/^bash /i.test(e.text)).length;
+  if (files.length) parts.push(`changed ${names(files)}`);
+  if (cmds) parts.push(`ran ${plural(cmds, "command")}`);
+  if (reads) parts.push(`looked at the code ${plural(reads, "time")}`);
+  const s = parts.join(", ");
+  return s ? s[0].toUpperCase() + s.slice(1) + "." : "";
+}
+
+// category is what a filter chip calls an event.
+function category(e) {
+  switch (e.kind) {
+    case "tool": return "commands";
+    case "file": return "files";
+    case "check": return "checks";
+    case "error": case "warn": case "stderr": return "errors";
+    default: return "messages";
+  }
+}
+// hidden events carry no information for a reader unless they ask for everything.
+const hidden = e => e.kind === "stderr" || e.kind === "usage" || e.kind === "done" && e.text === "finished" ||
+  e.kind === "msg" && (isJSON(e.text) || /^checkpoint [0-9a-f]+$/.test(e.text)) || !!attemptMsg(e);
+
+function matches(e) {
+  if (logState.filter !== "all" && category(e) !== logState.filter) return false;
+  return !logState.q || (e.text || "").toLowerCase().includes(logState.q);
+}
+
+// timeline turns a run's events into readable rows: commands and checks in a row fold together,
+// attempts get a divider that says why they happened, noise is left out.
+function timeline(g, all, decided) {
+  const rows = [], t0 = g.first, filtered = logState.filter !== "all" || logState.q;
+  let att = 0, prevChecks = [], i = 0;
+  // the event that decided the outcome is already the section's first line
+  const ev = g.events.filter(e => (all || !hidden(e) && e !== decided) && matches(e));
+  while (i < ev.length) {
+    const e = ev[i];
+    if (!filtered && e.att > 1 && e.att !== att && g.events.some(x => x.att === e.att - 1)) {
+      const failed = prevChecks.filter(c => !c.ok).map(c => c.cmd);
+      const d = el("li", "ldiv");
+      d.append(el("b", "", `Attempt ${e.att} of 3`), failed.length ? el("span", "", `because ${failed.length === 1 ? "a check" : plural(failed.length, "check")} failed: ${names(failed)}`) : "");
+      rows.push(d);
+    }
+    att = e.att || att;
+    // a run of the same kind folds into one row
+    let j = i;
+    while (j + 1 < ev.length && ["tool", "check"].includes(e.kind) && ev[j + 1].kind === e.kind && ev[j + 1].att === e.att) j++;
+    const group = ev.slice(i, j + 1);
+    if (e.kind === "check") prevChecks = group.map(check);
+    rows.push(row(group, t0));
+    i = j + 1;
+  }
+  return rows;
+}
+
+// toolText is a tool call as a reader wants it: the command itself for the shell, else "Read file".
+const toolText = e => /^bash /i.test(e.text) ? e.text.replace(/^bash /i, "") : e.text;
+
+// inline renders the little markdown agents write: `code`, **bold**, and headings as plain lines.
+function inline(text) {
+  const out = [];
+  for (const part of text.replace(/^#{1,6} /gm, "").split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/)) {
+    if (/^`[^`]+`$/.test(part)) out.push(el("code", "", part.slice(1, -1)));
+    else if (/^\*\*[^*]+\*\*$/.test(part)) out.push(el("b", "", part.slice(2, -2)));
+    else if (part) out.push(part);
+  }
+  return out;
+}
+
+function row(group, t0) {
+  const e = group[0], li = el("li", "lrow"), x = el("div", "lx");
+  let k = e.kind, ic = "msg", cls = "";
+  const t = el("span", "lt", since(e.ts, t0));
+  t.title = new Date(e.ts).toLocaleString();
+  if (e.kind === "tool") {
+    ic = "tool";
+    if (group.length === 1) { x.append(el("code", "", toolText(e))); x.className = "lx one"; x.title = toolText(e); x.onclick = () => x.classList.toggle("one"); }
+    else {
+      const d = el("details"), ul = el("ul");
+      group.forEach(g => ul.append(el("li", "", toolText(g))));
+      const cmds = group.filter(g => /^bash /i.test(g.text)).length;
+      d.append(el("summary", "", cmds === group.length ? `Ran ${group.length} commands` : `Used tools ${group.length} times`), ul);
+      x.append(d);
+    }
+  } else if (e.kind === "check") {
+    const cs = group.map(check), ok = cs.filter(c => c.ok).length;
+    ic = ok === cs.length ? "ok" : "bad"; cls = ic;
+    const d = el("details"), ul = el("ul");
+    cs.forEach(c => ul.append(el("li", "", `${c.ok ? "passed" : "failed"}  ${c.cmd}`)));
+    d.append(el("summary", "", `Checks: ${ok} of ${cs.length} passed`), ul);
+    x.append(d);
+  } else if (e.kind === "file") {
+    ic = "file"; x.append(`${fileVerb(e)} `, el("code", "", fileOf(e)));
+  } else if (e.kind === "plan") {
+    ic = "plan"; cls = "mgr"; x.textContent = e.text.replace(/ \(checks: .*\)$/, "");
+    const checks = / \(checks: (.*)\)$/.exec(e.text)?.[1];
+    if (checks) x.title = "checks: " + checks;
+  } else if (e.kind === "verdict") {
+    ic = e.text.startsWith("✗") ? "bad" : "verdict"; cls = e.text.startsWith("✗") ? "bad" : "mgr";
+    x.textContent = e.text.replace(/^[✓✗] /, "").replace(/^./, c => c.toUpperCase());
+  } else if (e.kind === "request") {
+    ic = "you"; cls = "you"; x.textContent = e.text.replace(/^you /, "You ");
+  } else if (e.kind === "error" || e.kind === "warn" || e.kind === "stderr") {
+    ic = "error"; cls = e.kind === "warn" ? "warn" : "bad"; x.textContent = e.text;
+  } else if (e.kind === "done") {
+    if (isTerminalDone(e)) { ic = "flag"; cls = "ok"; k = "other"; x.textContent = e.text.replace(/^./, c => c.toUpperCase()); }
+    else { k = "answer"; x.append(...inline(e.text)); x.className = "lx clamp"; x.onclick = () => x.classList.toggle("clamp"); }
+  } else if (e.kind === "start") {
+    ic = "flag"; k = "other"; x.append("Started", e.text ? ": " : "", e.text || "");
+  } else if (e.kind === "merge") {
+    ic = "verdict"; cls = "ok"; k = "other"; x.textContent = e.text.replace(/^./, c => c.toUpperCase());
+  } else {
+    x.append(...inline(e.text || ""));
+    if ((e.text || "").length > 280 || (e.text || "").split("\n").length > 4) { x.className = "lx clamp"; x.onclick = () => x.classList.toggle("clamp"); }
+  }
+  if ($("#raw").checked && group.some(g => g.raw)) {
+    const d = el("details"); d.append(el("summary", "", "raw output"), el("pre", "", group.map(g => g.raw).filter(Boolean).join("\n\n")));
+    x.append(d);
+  }
+  li.dataset.k = k;
+  li.append(t, icon(ic, cls), x);
+  return li;
+}
+
+// checklist shows the last round of checks, with a failure's telling line and output right there.
+function checklist(g) {
+  const cs = lastChecks(g);
+  if (!cs.length) return null;
+  const ul = el("ul", "lchk");
+  for (const c of cs) {
+    const li = el("li");
+    li.append(icon(c.ok ? "ok" : "bad", c.ok ? "ok" : "bad"), el("code", "", c.cmd));
+    if (!c.ok && c.out) {
+      li.append(el("div", "lkey", keyLine(c.out)));
+      const d = el("details"); d.append(el("summary", "", "Full output"), el("pre", "", c.out));
+      li.append(d);
+    }
+    ul.append(li);
+  }
+  return ul;
+}
+
+function section(g, latest, all, first) {
+  const d = el("details", "lrun"), o = outcome(g, latest), sum = el("summary");
+  d.dataset.state = o.state;
+  d.open = logState.open.has(g.key) ? logState.open.get(g.key) : first; // the newest run that did something starts open
+  d.ontoggle = () => logState.open.set(g.key, d.open);
+  const runs = new Set(g.events.map(e => e.run).filter(Boolean));
+  let tokens = [...runs].reduce((n, r) => n + (logState.runs.get(r)?.tokens || 0), 0);
+  if (latest && BUSY.includes(summary.agents[logState.agent]?.status)) tokens = Math.max(tokens, summary.agents[logState.agent]?.tokens || 0);
+  const attempts = Math.max(0, ...g.events.map(e => e.att));
+  const meta = [fmtDur((o.state === "running" || o.state === "awaiting" ? Date.now() : g.last) - g.first)];
+  if (attempts > 1) meta.push(plural(attempts, "attempt"));
+  if (tokens) meta.push(fmtTok(tokens) + " tokens");
+  const goal = g.events.find(e => e.kind === "start")?.text;
+  const label = o.state === "other" ? (g.events.some(e => e.kind === "merge") ? "Merge at " : "Sync at ") + clock(g.first) : goal || "Run at " + clock(g.first);
+  if (goal) meta.unshift(clock(g.first));
+  const when = el("span", "lwhen", label);
+  when.title = goal || "";
+  sum.append(el("span", "lstate", o.word), when, el("span", "lmeta", meta.join(" · ")));
+  if (logState.focus && g.key === logState.focus) { d.open = true; logState.focusEl = d; }
+  const body = el("div", "lbody");
+  const filtered = logState.filter !== "all" || logState.q;
+  if (!filtered) {
+    const ask = g.events.find(e => e.kind === "request");
+    if (ask) {
+      const p = el("p", "lask"), newPlan = /^you asked for a new plan/.test(ask.text);
+      p.append(el("b", "", newPlan ? "You asked for a new plan: " : "You asked: "),
+        ask.text.replace(/^you asked for (changes: |a new plan( and said: )?)/, "") || "(no note)");
+      body.append(p);
+    }
+    const out = el("p", "lout");
+    Array.isArray(o.line) ? out.append(...o.line) : out.append(o.line);
+    if (o.line) body.append(out);
+    const act = activity(g);
+    if (act) body.append(el("p", "lact", act));
+    const cl = checklist(g);
+    if (cl) body.append(cl);
+    const manager = kidsOf(logState.agent).length > 0;
+    if (latest && manager && ["blocked", "failed"].includes(o.state)) {
+      const p = el("p", "lnext"), b = el("button", "primary", "Continue");
+      b.type = "button";
+      b.onclick = continueRun;
+      p.append("Fixed what stopped it? ", b, " picks up from here: finished reports keep their work, the rest run again.");
+      body.append(p);
+    } else if (latest && ["done", "failed", "blocked"].includes(o.state) && canRevise(logState.agent)) {
+      const p = el("p", "lnext");
+      p.append("Not quite right? ", reviseButton("primary"));
+      body.append(p);
+    }
+  }
+  const rows = timeline(g, all, o.by);
+  if (rows.length) { const ol = el("ol", "ltime"); ol.append(...rows); body.append(ol); }
+  d.append(sum, body);
+  return { d, count: rows.length };
+}
+
+function stoppedRuns(gs) {
+  const d = el("details", "lrun"), sum = el("summary");
+  d.dataset.state = "stopped";
+  sum.append(el("span", "lstate", "Stopped"), el("span", "lwhen", `${gs.length} runs stopped before they did anything`),
+    el("span", "lmeta", `${clock(gs.at(-1).first)} to ${clock(gs[0].first)}`));
+  const body = el("div", "lbody"), ul = el("ul", "lchk");
+  gs.forEach(g => { const li = el("li"); li.append(icon("error"), el("span", "", "Run at " + clock(g.first))); ul.append(li); });
+  body.append(ul);
+  d.append(sum, body);
+  return d;
+}
+
+function renderFilters(events, all) {
+  const counts = { all: 0, messages: 0, commands: 0, files: 0, checks: 0, errors: 0 };
+  for (const e of events) if (all || !hidden(e)) { counts.all++; counts[category(e)]++; }
+  const labels = { all: "All", messages: "Messages", commands: "Commands", files: "Files", checks: "Checks", errors: "Errors" };
+  $("#log-filters").replaceChildren(...Object.keys(labels).filter(k => k === "all" || counts[k]).map(k => {
+    const b = el("button", logState.filter === k ? "on" : "");
+    b.type = "button";
+    b.append(labels[k], el("b", "", counts[k]));
+    b.onclick = () => { logState.filter = k; renderLogs(); };
+    return b;
+  }));
+}
+
+function renderLogs() {
+  if (logState.agent !== selected) return;
+  const all = $("#raw").checked, top = logPane.scrollTop;
+  renderFilters(logState.events, all);
+  const groups = sessionsOf(logState.events).reverse();
+  const filtered = logState.filter !== "all" || logState.q;
+  const st = summary.agents[logState.agent];
+  if (st && (BUSY.includes(st.status) || st.status === "awaiting") && st.since && !(groups[0] && groups[0].first >= st.since - 2000 && !groups[0].legacy))
+    groups.unshift({ key: "now", events: [], first: st.since, last: Date.now() }); // it started, and hasn't logged anything yet
+  const secs = [];
+  for (let i = 0; i < groups.length; i++) {
+    // runs stopped before they did anything fold into one line
+    const idle = g => g.events.length <= 3 && g.events.every(e => e.kind === "request" || e.kind === "start" || e.kind === "error" && /^stopped by user/.test(e.text));
+    let j = i;
+    while (!filtered && j + 1 < groups.length && idle(groups[i]) && idle(groups[j + 1]) && !(i === 0 && BUSY.includes(summary.agents[logState.agent]?.status))) j++;
+    if (j > i) { secs.push({ d: stoppedRuns(groups.slice(i, j + 1)), count: 1 }); i = j; continue; }
+    secs.push(section(groups[i], i === 0, all, !secs.some(s => s.full)));
+    secs.at(-1).full = true;
+  }
+  if (filtered) secs.splice(0, secs.length, ...secs.filter(s => s.count));
+  if (!secs.length) log.replaceChildren(el("div", "empty", logState.events.length ? "Nothing matches." : "No activity yet. Set a goal and press Run."));
+  else log.replaceChildren(...secs.map(s => s.d));
+  logPane.scrollTop = top;
+  if (logState.focusEl) { logState.focusEl.scrollIntoView({ block: "start" }); logState.focusEl = logState.focus = null; }
+  renderLogNow();
+}
+
+// renderLogNow pins what the agent is doing right now above its log.
+function renderLogNow() {
+  const st = selected && summary.agents[selected], box = $("#log-now"), busy = st && (BUSY.includes(st.status) || st.status === "awaiting");
+  box.hidden = !busy;
+  if (!busy) return;
+  box.style.setProperty("--s", `var(--${st.status === "awaiting" ? "awaiting" : ["planning", "waiting", "reviewing", "fixing"].includes(st.status) ? "manager" : st.status === "verifying" ? "verifying" : "running"})`);
+  $("#log-now-text").textContent = (st.status === "awaiting" ? "Waiting for you to approve the plan" : `${nameOf(selected)} ${WORKING[st.status] ?? st.status}`) +
+    (st.since ? ` · ${fmtDur(Date.now() - st.since)}` : "") + (st.now ? ` · now: ${st.now}` : "");
+}
 
 async function loadLogs() {
   if (!selected) return;
-  const es = await api("GET", `/api/agents/${selected}/events`).catch(e => (say(e.message, true), []));
-  log.replaceChildren(...es.map(evRow));
-  if (!es.length) log.append(el("div", "empty", "No activity yet. Set a goal and press Run."));
-  logPane.scrollTop = logPane.scrollHeight;
+  const id = selected;
+  const [es, rs] = await Promise.all([
+    api("GET", `/api/agents/${id}/events`).catch(e => (say(e.message, true), [])),
+    api("GET", `/api/agents/${id}/runs`).catch(() => []),
+  ]);
+  if (id !== selected) return;
+  if (logState.agent !== id) Object.assign(logState, { open: new Map(), filter: "all", q: "" }), $("#log-search").value = "";
+  Object.assign(logState, { agent: id, events: es, runs: new Map(rs.map(r => [r.id, r])) });
+  renderLogs();
 }
 
-// Live rows are batched per animation frame and capped, so a chatty agent can't stall the page.
-let pending = [], frame = 0;
+$("#raw").onchange = renderLogs;
+$("#log-search").oninput = e => { logState.q = e.target.value.trim().toLowerCase(); renderLogs(); };
+
+// live events join the log; the view re-renders at most a few times a second
+let logTimer = 0;
 function appendLive(e) {
-  pending.push(e);
-  frame ||= requestAnimationFrame(() => {
-    const atBottom = logPane.scrollTop + logPane.clientHeight >= logPane.scrollHeight - 30;
-    log.querySelector(".empty")?.remove();
-    log.append(...pending.map(evRow));
-    while (log.childElementCount > MAX_LOG_ROWS) log.firstElementChild.remove();
-    if (atBottom) logPane.scrollTop = logPane.scrollHeight;
-    pending = []; frame = 0;
-  });
+  if (logState.agent !== e.agent) return;
+  logState.events.push(e);
+  if (logState.events.length > MAX_LOG_ROWS) logState.events.splice(0, logState.events.length - MAX_LOG_ROWS);
+  logTimer ||= setTimeout(() => { logTimer = 0; renderLogs(); }, 250);
 }
 
 /* ---------- diff: select hunks to remove or promote; revert checkpoints ---------- */
@@ -801,11 +2105,14 @@ async function loadPreview() {
   catch (e) { box.replaceChildren(el("p", "note bad", e.message)); return; }
   const lines = [];
   if (!mform.elements.target.value) mform.elements.target.value = p.target;
+  if (!mform.elements.message.dataset.edited) mform.elements.message.value = p.message; // every change it brings in
   const st = summary.agents[selected];
   if (st && st.status !== "done") lines.push(el("p", "note", `${nameOf(selected)} isn't done (${st.status}), so this work hasn't passed its checks.`));
+  const something = (p.commits && p.files) || p.uncommitted > 0;
   lines.push(el("span", "", p.commits && p.files
     ? `${p.commits} commit${p.commits > 1 ? "s" : ""} · ${p.files} file${p.files !== 1 ? "s" : ""} · +${p.adds} −${p.dels}`
-    : `Nothing to merge: ${p.target} already has all of this work.`));
+    : something ? "No checkpoints to merge yet." : `Nothing to merge: ${p.target} already has all of this work.`));
+  if (p.uncommitted) lines.push(el("p", "note", `Plus ${p.uncommitted} file${p.uncommitted > 1 ? "s" : ""} changed since the last checkpoint, not counted above. Merging saves ${p.uncommitted > 1 ? "them" : "it"} as a checkpoint first.`));
   if (!p.exists) lines.push(el("span", "", `Creates branch ${p.target} from ${p.start}.`));
   if (p.checkedOut) lines.push(el("p", p.dirty ? "note bad" : "note", p.dirty
     ? `${p.target} is checked out in ${p.checkedOut} with uncommitted changes. Commit or stash them first.`
@@ -817,18 +2124,20 @@ async function loadPreview() {
   }
   $("#m-ff").disabled = !p.canFF;
   if (!p.canFF && mform.elements.strategy.value === "ff") mform.elements.strategy.value = "merge";
-  $("#m-go").disabled = !p.commits || !p.files || p.dirty || p.conflicts.length > 0;
+  $("#m-go").disabled = !something || p.dirty || p.conflicts.length > 0;
   box.replaceChildren(...lines);
 }
 
 $("#i-merge").onclick = async () => {
   $("#m-agent").textContent = nameOf(selected);
   mform.elements.target.value = "";
-  mform.elements.message.value = gform.elements.title.value;
+  mform.elements.message.value = "";
+  delete mform.elements.message.dataset.edited;
   status($("#m-msg"), "");
   mdlg.showModal();
   await loadPreview();
 };
+mform.elements.message.oninput = () => { mform.elements.message.dataset.edited = "1"; };
 mform.elements.target.oninput = () => { clearTimeout(previewTimer); previewTimer = setTimeout(loadPreview, 350); };
 mform.onsubmit = async e => {
   if (e.submitter?.value === "cancel") return;
@@ -855,6 +2164,10 @@ function refreshCards() {
     const busy = BUSY.includes(card.dataset.status);
     card.classList.toggle("busy", busy);
     card.querySelector(".now").textContent = st?.now || (st?.title ? "goal: " + st.title : "no goal yet");
+    const draft = plans.get(parentOf(a.id)), item = draft && planItems(draft).find(x => x.agent === a.id);
+    card.classList.toggle("proposed", !!item);
+    card.classList.toggle("left-out", !!draft && !item);
+    if (item) card.querySelector(".now").textContent = draft.kind === "revision" ? "proposed change: " + item.change : "proposed: " + item.title;
     const b = card.querySelector(".badges");
     b.replaceChildren();
     if (!st) continue;
@@ -864,12 +2177,17 @@ function refreshCards() {
       b.append(t);
     }
     if (st.total) b.append(el("span", st.passed === st.total ? "ok" : "bad", `✓ ${st.passed}/${st.total}`));
+    if (st.queueTotal) {
+      const q = el("span", "q", `goals ${st.queueDone}/${st.queueTotal}`);
+      q.title = st.queueActive ? "Working through its goals" : st.queuePaused ? `Stopped at "${st.queuePaused}": it failed` : `${plural(st.queueWaiting, "goal")} to run`;
+      b.append(q);
+    }
     if (st.adds || st.dels) b.append(el("span", "", `+${st.adds} −${st.dels}`));
     if (st.attempts > 1) b.append(el("span", "", `try ${st.attempts}/3`));
     if (st.tokens) {
       const lc = limitClass(st);
       const tok = el("span", lc, (lc ? "⚠ " : "") + fmtTok(st.tokens) + " tok");
-      tok.title = `$${st.cost.toFixed(2)} this run` + (lc === "over" ? " · over the hard limit" : lc === "warn" ? " · over the soft limit" : "");
+      tok.title = "tokens this run" + (lc === "over" ? " · over the hard limit" : lc === "warn" ? " · over the soft limit" : "");
       b.append(tok);
     }
   }
@@ -881,23 +2199,25 @@ async function refreshSummary() {
   refreshCards();
   renderStats();
   const all = Object.entries(summary.agents);
-  const goals = all.filter(([, s]) => s.title);
-  const done = goals.filter(([, s]) => s.status === "done").length;
-  const needs = all.filter(([, s]) => NEEDS.includes(s.status));
+  const needs = all.filter(([, s]) => NEEDS.includes(s.status) || s.status === "awaiting" || s.queuePaused);
+  syncPlans();
   const running = all.filter(([, s]) => BUSY.includes(s.status)).length;
-  $("#n-done").textContent = done;
-  $("#n-goals").textContent = goals.length;
   $("#n-running").textContent = running;
-  $("#bar .live").hidden = running === 0;
-  $("#bar .prog i").style.width = goals.length ? (100 * done / goals.length) + "%" : 0;
-  $("#cost").textContent = summary.cost.toFixed(2);
+  $("#running").hidden = running === 0;
+  $("#tokens").textContent = fmtTok(all.reduce((n, [, s]) => n + (s.allTokens || 0), 0));
   $("#n-needs").textContent = needs.length;
+  showTabState(needs.length, running);
   $("#needs").dataset.n = needs.length;
+  $("#needs").dataset.kind = needs.every(([, s]) => s.status === "awaiting") ? "plan" : "fail"; // amber for plans, red for failures
+  if (!needs.length) $("#needs").open = false;
   $("#needs ul").replaceChildren(...needs.map(([id, s]) => {
-    const li = el("li", "", `✗ ${nameOf(id)}: ${s.status} · ${s.title}`);
-    li.onclick = () => { $("#needs").open = false; select(id); };
+    const li = el("li", "", s.status === "awaiting" ? `${nameOf(id)}: plan waiting for your approval`
+      : s.queuePaused ? `${nameOf(id)} stopped at "${s.queuePaused}": it failed`
+      : `${nameOf(id)}: ${s.status} · ${s.title}`);
+    li.onclick = () => { $("#needs").open = false; if (s.status === "awaiting") tab = "goal"; select(id); };
     return li;
   }));
+  if (selected && queue && !$("#queue").hidden) renderQueue(); // whether it can take changes depends on its status
   if (selected && summary.agents[selected]) {
     const g = (await api("GET", `/api/agents/${selected}`).catch(() => null))?.goal;
     if (g) showGoalState(g);
@@ -911,6 +2231,7 @@ function setStatus(id, s) {
   st.status = s;
   if (BUSY.includes(s) && !st.since) st.since = Date.now();
   refreshCards();
+  if (id === selected) showStop();
 }
 
 let summaryTimer = 0;
@@ -939,23 +2260,34 @@ setInterval(() => {
 const es = new EventSource("/api/events?project=" + encodeURIComponent(PID));
 es.onmessage = m => {
   const msg = JSON.parse(m.data);
-  if (msg.type === "hello") {
-    $("#stale").hidden = msg.build === String(window.BUILD); // this page came from an older run of the server
+  if (msg.type === "hello" || msg.type === "resync") {
+    // a (re)connect or missed updates: whatever changed meanwhile never arrived, so reload the state
+    if (msg.type === "hello") $("#stale").hidden = msg.build === String(window.BUILD); // this page came from an older run of the server
+    refreshSummary();
+    if (selected && tab === "logs") loadLogs();
   } else if (msg.type === "event") {
     const e = msg.event;
     if (e.kind !== "stderr") {
       const now = cardOf(e.agent)?.querySelector(".now");
-      if (now) now.textContent = `${e.kind}: ${e.text}`;
+      if (now) now.textContent = `${e.kind === "start" ? "started" : e.kind}: ${e.text}`;
     }
     if (e.agent === selected && tab === "logs") appendLive(e);
     if (e.agent === selected && e.kind !== "stderr") scheduleLiveDiff(); // it edited files, ran a tool, checkpointed...
+  } else if (msg.type === "plan") {
+    loadPlan(msg.agent);
+  } else if (msg.type === "queue") {
+    scheduleSummary();
+    if (msg.agent === selected) { loadQueue(); refreshGoalFields(); }
   } else if (msg.type === "status" || msg.type === "usage") {
     if (msg.type === "status") setStatus(msg.agent, msg.status);
+    if (msg.type === "status" && msg.agent === selected && tab === "logs") loadLogs(); // its outcome and totals changed
     scheduleSummary();
     if (msg.type === "status" && msg.agent === selected && tab === "diff" && !selectedHunks().length) loadDiff(); // don't wipe a selection in progress
   }
 };
 $("#reload").onclick = () => location.reload();
+// a backstop for anything a live update didn't cover
+setInterval(() => { if (!document.hidden) refreshSummary(); }, 15000);
 
 /* ---------- start ---------- */
 
@@ -963,5 +2295,7 @@ renderTypes();
 if ([...agents.values()].some(a => a.x == null || a.y == null)) layout(false);
 agents.forEach(makeCard);
 refreshCards();
+showEmptyCanvas();
+loadSetup(); // suggested checks for the goal forms
 refreshSummary();
 document.fonts?.ready.then(drawLinks); // box heights settle once fonts load

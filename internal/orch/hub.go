@@ -9,21 +9,38 @@ import (
 // activity line.
 type Hub struct {
 	mu   sync.Mutex
-	subs map[chan []byte]string // chan -> project id
-	last map[string]string      // agent id -> latest activity
+	subs map[chan []byte]*sub
+	last map[string]string // agent id -> latest activity
+}
+
+type sub struct {
+	project string
+	dropped bool // a message didn't fit; the page must reload its state
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: map[chan []byte]string{}, last: map[string]string{}}
+	return &Hub{subs: map[chan []byte]*sub{}, last: map[string]string{}}
 }
 
 // Subscribe returns a channel of JSON messages for one project.
 func (h *Hub) Subscribe(project string) chan []byte {
 	c := make(chan []byte, 256)
 	h.mu.Lock()
-	h.subs[c] = project
+	h.subs[c] = &sub{project: project}
 	h.mu.Unlock()
 	return c
+}
+
+// Dropped reports, once, whether messages to c were dropped since the last call.
+func (h *Hub) Dropped(c chan []byte) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.subs[c]
+	if s == nil || !s.dropped {
+		return false
+	}
+	s.dropped = false
+	return true
 }
 
 func (h *Hub) Unsubscribe(c chan []byte) {
@@ -37,13 +54,14 @@ func (h *Hub) Publish(project string, v any) {
 	b, _ := json.Marshal(v)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for c, p := range h.subs {
-		if p != project {
+	for c, s := range h.subs {
+		if s.project != project {
 			continue
 		}
 		select {
 		case c <- b:
-		default: // ponytail: slow client drops live events; the Logs tab refetches on open
+		default: // a slow page misses this; it's told to reload once it catches up
+			s.dropped = true
 		}
 	}
 }

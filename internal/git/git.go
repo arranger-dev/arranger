@@ -9,7 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 )
 
 // Run runs git in dir and returns its combined output.
@@ -72,8 +74,14 @@ func BranchExists(repo, branch string) bool {
 	return err == nil
 }
 
+// worktreeMu serializes creating worktrees: reports that start together would otherwise run
+// "git worktree add" in the same repository at once, and git's locks make all but one fail.
+var worktreeMu sync.Mutex
+
 // EnsureWorktree returns the agent's worktree, creating it on branch arranger/<agent> from base.
 func EnsureWorktree(root, repo, base, agentID string) (string, error) {
+	worktreeMu.Lock()
+	defer worktreeMu.Unlock()
 	dir := filepath.Join(root, agentID)
 	if _, err := os.Stat(dir); err == nil {
 		return dir, nil
@@ -86,6 +94,84 @@ func EnsureWorktree(root, repo, base, agentID string) (string, error) {
 	Run(repo, "worktree", "prune")
 	_, err := Run(repo, args...)
 	return dir, err
+}
+
+// RemoveWorktree deletes an agent's worktree and its branch arranger/<agent>, for an agent that was
+// removed. Missing pieces are fine: it may never have run.
+func RemoveWorktree(repo, dir, agentID string) error {
+	if _, err := os.Stat(dir); err == nil {
+		if _, err := Run(repo, "worktree", "remove", "--force", dir); err != nil {
+			if err := os.RemoveAll(dir); err != nil {
+				return err
+			}
+		}
+	}
+	Run(repo, "worktree", "prune")
+	if BranchExists(repo, BranchOf(agentID)) {
+		if _, err := Run(repo, "branch", "-D", BranchOf(agentID)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// housekeeping commits say nothing about what the work changes: saves, syncs, and edits made by
+// hand in the Diff tab.
+func housekeeping(s string) bool {
+	for _, p := range []string{"Save uncommitted work", "Sync with", "arranger: ", "Promote "} {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return strings.Contains(s, "change(s) by hand in the Diff tab")
+}
+
+// oldCheckpoint matches checkpoints from before commits described their change: "arranger: Name attempt 2".
+var oldCheckpoint = regexp.MustCompile(`^arranger: .+ attempt \d+$`)
+
+// ChangeLines are the one-line messages of the work on to that from doesn't have yet, oldest first:
+// no merges, housekeeping or repeats, and a reverted commit takes its line out with it. Old
+// checkpoints that don't say what they changed are described by describe (if it knows, e.g. from
+// the run log), else by the files they touch.
+func ChangeLines(dir, from, to string, describe func(sha string) string) []string {
+	out, err := Run(dir, "log", "--reverse", "--no-merges", "--format=%H%x1f%s", from+".."+to)
+	if err != nil {
+		return nil
+	}
+	var ls []string
+	for _, row := range lines(out) {
+		sha, l, _ := strings.Cut(row, "\x1f")
+		if oldCheckpoint.MatchString(l) {
+			if describe != nil {
+				l = describe(sha)
+			}
+			if l == "" || oldCheckpoint.MatchString(l) {
+				l = filesLine(dir, sha)
+			}
+		}
+		if undone, ok := strings.CutPrefix(l, `Revert "`); ok {
+			undone = strings.TrimSuffix(undone, `"`)
+			ls = slices.DeleteFunc(ls, func(x string) bool { return x == undone })
+			continue
+		}
+		if l != "" && !housekeeping(l) && !slices.Contains(ls, l) {
+			ls = append(ls, l)
+		}
+	}
+	return ls
+}
+
+// filesLine describes a commit by the files it touches: "Update a.go, b.go and 3 more".
+func filesLine(dir, sha string) string {
+	out, _ := Run(dir, "show", "--name-only", "--format=", sha)
+	fs := lines(out)
+	switch {
+	case len(fs) == 0:
+		return ""
+	case len(fs) > 3:
+		return fmt.Sprintf("Update %s and %d more", strings.Join(fs[:3], ", "), len(fs)-3)
+	}
+	return "Update " + strings.Join(fs, ", ")
 }
 
 // Commit commits everything in the worktree. Returns "" when there was nothing to commit.
@@ -233,7 +319,7 @@ func HunkPatch(fs []FileDiff, ids map[string]bool) (patch string, n int) {
 // commits. Hunks dir already has are skipped (present); the rest apply as a patch, or as a
 // three-way merge when dir's files have moved on. On a conflict dir is left as it was.
 func ApplyHunks(dir string, fs []FileDiff, ids map[string]bool) (applied, present int, err error) {
-	if _, err := Commit(dir, "arranger: save work before applying changes"); err != nil {
+	if _, err := Commit(dir, "Save uncommitted work before applying selected changes"); err != nil {
 		return 0, 0, err
 	}
 	todo := map[string]bool{}
@@ -296,7 +382,7 @@ func Checkpoints(dir, base string) ([]Checkpoint, error) {
 
 // Revert undoes one checkpoint with a new commit; a conflicting revert is abandoned.
 func Revert(dir, sha string) error {
-	if _, err := Commit(dir, "arranger: save work before revert"); err != nil {
+	if _, err := Commit(dir, "Save uncommitted work before reverting a checkpoint"); err != nil {
 		return err
 	}
 	if _, err := Run(dir, append(identity, "revert", "--no-edit", sha)...); err != nil {
@@ -308,11 +394,29 @@ func Revert(dir, sha string) error {
 
 // MergeBranch merges branch into the worktree at dir; a conflicting merge is abandoned.
 func MergeBranch(dir, branch, msg string) error {
-	if _, err := Commit(dir, "arranger: save work before merge"); err != nil {
+	if _, err := Commit(dir, "Save uncommitted work before merging"); err != nil {
 		return err
 	}
 	if _, err := Run(dir, append(identity, "merge", "--no-ff", "-m", msg, branch)...); err != nil {
 		Run(dir, "merge", "--abort")
+		return err
+	}
+	return nil
+}
+
+// MoveOnto replays the worktree's own commits since oldBase onto newBase, for an agent that moved
+// to another manager: it keeps its work and drops the old manager's. A conflicting move is
+// abandoned and the conflicts named.
+func MoveOnto(dir, newBase, oldBase string) error {
+	if _, err := Commit(dir, "Save uncommitted work before moving to a new manager"); err != nil {
+		return err
+	}
+	if _, err := Run(dir, append(identity, "rebase", "--onto", newBase, oldBase)...); err != nil {
+		out, _ := Run(dir, "diff", "--name-only", "--diff-filter=U")
+		Run(dir, "rebase", "--abort")
+		if cs := lines(out); len(cs) > 0 {
+			return fmt.Errorf("its work conflicts with %s in %s", newBase, strings.Join(cs, ", "))
+		}
 		return err
 	}
 	return nil
@@ -332,14 +436,14 @@ func Behind(dir, branch string) int {
 // Sync merges branch into the worktree at dir so the agent works on the latest code, and returns
 // how many new commits it brought in. A conflicting merge is abandoned and the conflicts named.
 func Sync(dir, branch string) (int, error) {
-	if _, err := Commit(dir, "arranger: save work before sync"); err != nil {
+	if _, err := Commit(dir, "Save uncommitted work before syncing"); err != nil {
 		return 0, err
 	}
 	n := Behind(dir, branch)
 	if n == 0 {
 		return 0, nil
 	}
-	if _, err := Run(dir, append(identity, "merge", "--no-edit", "-m", "arranger: sync with "+branch, branch)...); err != nil {
+	if _, err := Run(dir, append(identity, "merge", "--no-edit", "-m", fmt.Sprintf("Sync with %s: bring in %d new commit(s)", branch, n), branch)...); err != nil {
 		out, _ := Run(dir, "diff", "--name-only", "--diff-filter=U")
 		Run(dir, "merge", "--abort")
 		if cs := lines(out); len(cs) > 0 {
@@ -388,6 +492,17 @@ type MergePreview struct {
 	Dels       int      `json:"dels"`
 	CanFF      bool     `json:"canFF"`
 	Conflicts  []string `json:"conflicts"`
+	Message    string   `json:"message"` // the merge commit's message, listing every change it brings in
+	// Uncommitted counts files changed in the source's worktree since its last checkpoint. They
+	// aren't in the numbers above; merging commits them first.
+	Uncommitted int `json:"uncommitted"`
+}
+
+// Uncommitted counts the files changed in the worktree at dir that aren't committed yet, without
+// taking git's optional locks (a preview must not write).
+func Uncommitted(dir string) int {
+	out, _ := Run(dir, "--no-optional-locks", "status", "--porcelain")
+	return len(lines(out))
 }
 
 // PreviewMerge reports what merging source into target would do, without changing anything.

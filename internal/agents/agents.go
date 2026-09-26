@@ -32,6 +32,9 @@ type Runtime struct {
 	Tail      []string
 	PromptArg bool
 	Parse     func(line []byte) []Event
+	// Allow turns shell commands the agent may run without asking into flags, for CLIs that
+	// otherwise refuse commands in headless mode. nil: the CLI needs nothing.
+	Allow func(commands []string) []string
 }
 
 // withModel returns an Args func: base flags plus flag+model when a model is set.
@@ -46,7 +49,10 @@ func withModel(flag string, base ...string) func(string) []string {
 }
 
 var Runtimes = map[string]Runtime{
-	"claude":   {Bin: "claude", Args: withModel("--model", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"), Parse: parseClaude},
+	// acceptEdits allows file edits but refuses most shell commands in -p mode, so the agent's own
+	// check commands are allowed explicitly: it can run its tests before it says it's done.
+	"claude": {Bin: "claude", Args: withModel("--model", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"), Parse: parseClaude,
+		Allow: func(cmds []string) []string { return claudeAllow(cmds) }},
 	"codex":    {Bin: "codex", Args: withModel("-m", "exec", "--json", "--full-auto"), Tail: []string{"-"}, Parse: parseCodex},
 	"gemini":   {Bin: "gemini", Args: withModel("-m", "--output-format", "stream-json", "--approval-mode", "auto_edit"), Parse: parseGemini},
 	"pi":       {Bin: "pi", Args: withModel("--model", "-p", "--mode", "json"), Parse: parsePi},
@@ -68,9 +74,14 @@ func Installed() map[string]bool {
 	return m
 }
 
-// Command builds the process for a run. extra is the agent's free-form args.
-func (rt Runtime) Command(ctx context.Context, model, extra, prompt string) (*exec.Cmd, error) {
-	bin, args := rt.Bin, append(rt.Args(model), strings.Fields(extra)...)
+// Command builds the process for a run. extra is the agent's free-form args; allow lists shell
+// commands the agent may run without asking (its checks).
+func (rt Runtime) Command(ctx context.Context, model, extra, prompt string, allow []string) (*exec.Cmd, error) {
+	args := rt.Args(model)
+	if rt.Allow != nil && len(allow) > 0 {
+		args = append(args, rt.Allow(allow)...)
+	}
+	bin, args := rt.Bin, append(args, strings.Fields(extra)...)
 	if bin == "" {
 		if len(args) == 0 {
 			return nil, errors.New("generic runtime: put the command in the agent's extra args")
@@ -437,4 +448,49 @@ func Clip(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
+}
+
+// buildTools are programs a check commonly runs, allowed with any arguments so the agent can also
+// run a narrower version of its check (one package, one test file). Anything else is allowed only
+// exactly as the check spells it.
+var buildTools = map[string]bool{
+	"go": true, "gofmt": true, "npm": true, "npx": true, "pnpm": true, "yarn": true, "bun": true, "node": true, "deno": true,
+	"tsc": true, "jest": true, "vitest": true, "eslint": true, "prettier": true, "playwright": true,
+	"cargo": true, "rustc": true, "make": true, "cmake": true, "ctest": true,
+	"python": true, "python3": true, "pytest": true, "uv": true, "poetry": true, "ruff": true, "mypy": true, "tox": true,
+	"mvn": true, "gradle": true, "./gradlew": true, "./mvnw": true, "dotnet": true, "swift": true, "xcodebuild": true,
+	"mix": true, "bundle": true, "rake": true, "rspec": true, "php": true, "composer": true, "phpunit": true,
+	"test": true, "grep": true, "diff": true, "cat": true, "ls": true,
+}
+
+// claudeAllow lets Claude Code run the given check commands: each check exactly as written, plus
+// the build and test tools it uses with any arguments.
+func claudeAllow(checks []string) []string {
+	seen := map[string]bool{}
+	var tools []string
+	add := func(t string) {
+		if !seen[t] {
+			seen[t] = true
+			tools = append(tools, t)
+		}
+	}
+	for _, c := range checks {
+		if c = strings.TrimSpace(c); c == "" {
+			continue
+		}
+		add("Bash(" + c + ")")
+		for _, part := range strings.FieldsFunc(c, func(r rune) bool { return r == '&' || r == '|' || r == ';' }) {
+			words := strings.Fields(part)
+			for len(words) > 0 && strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-") {
+				words = words[1:] // FOO=bar go test: the program is go
+			}
+			if len(words) > 0 && buildTools[words[0]] {
+				add("Bash(" + words[0] + ":*)")
+			}
+		}
+	}
+	if len(tools) == 0 {
+		return nil
+	}
+	return append([]string{"--allowedTools"}, tools...)
 }

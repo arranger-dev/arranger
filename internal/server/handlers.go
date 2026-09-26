@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,8 +10,11 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"go.uber.org/zap"
+
 	"arranger/internal/agents"
 	"arranger/internal/git"
+	"arranger/internal/orch"
 	"arranger/internal/store"
 )
 
@@ -90,15 +94,38 @@ func (s *Server) saveArrangement(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
+	parent := map[string]string{}
+	for _, a := range as {
+		parent[a.ID] = a.Parent
+	}
+	names := map[string]string{}
+	for _, a := range old {
+		names[a.ID] = a.Name
+	}
 	for _, a := range old {
 		if !keep[a.ID] && s.o.IsRunning(a.ID) {
 			fail(w, http.StatusConflict, fmt.Errorf("%s is running; stop it before removing it", a.Name))
+			return
+		}
+		// a waiting plan names its manager's reports; they stay put until it's decided
+		if a.Parent != "" && s.o.Awaiting(a.Parent) && (!keep[a.ID] || parent[a.ID] != a.Parent) {
+			fail(w, http.StatusConflict, fmt.Errorf("%s's plan is waiting for you; approve or cancel it before moving or removing %s", names[a.Parent], a.Name))
 			return
 		}
 	}
 	if err := s.st.SaveArrangement(r.PathValue("id"), as); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
+	}
+	// removed agents take their worktree and branch with them (the page warned about unmerged work)
+	if p, err := s.st.Project(r.PathValue("id")); err == nil && p.Repo != "" {
+		for _, a := range old {
+			if !keep[a.ID] {
+				if err := s.o.Remove(p.Repo, a.ID); err != nil {
+					zap.L().Warn("clean up removed agent", zap.String("agent", a.Name), zap.Error(err))
+				}
+			}
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -114,7 +141,17 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, map[string]any{"agent": a, "goal": g})
+	// dir is where the agent works, "" until its first run made the worktree
+	dir, shown := s.o.Dir(a.ID), ""
+	if _, err := os.Stat(dir); err == nil {
+		shown = dir
+		if home, err := os.UserHomeDir(); err == nil {
+			if rest, ok := strings.CutPrefix(dir, home+string(filepath.Separator)); ok {
+				shown = "~/" + rest
+			}
+		}
+	}
+	writeJSON(w, map[string]any{"agent": a, "goal": g, "dir": shown, "branch": git.BranchOf(a.ID)})
 }
 
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
@@ -162,12 +199,72 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 }
 
 // revise re-runs an agent to make the change the user describes (see Orchestrator.Revise).
+// With a goal (a finished goal of its list), the change is about that goal: it becomes the
+// agent's goal again, and the change is made on top of the agent's current work.
 func (s *Server) revise(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Change string }
+	var req struct {
+		Change string
+		Goal   int64
+	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.o.Revise(r.PathValue("id"), req.Change); err != nil {
+	id := r.PathValue("id")
+	if req.Goal != 0 {
+		it, err := s.st.QueueItem(id, req.Goal)
+		if err != nil {
+			http.Error(w, "that goal isn't in this agent's list", http.StatusNotFound)
+			return
+		}
+		if s.o.IsRunning(id) {
+			http.Error(w, "stop it before asking for changes", http.StatusConflict)
+			return
+		}
+		if err := s.st.SaveGoal(id, store.Goal{Title: it.Title, Body: it.Body, Criteria: it.Criteria, Checks: it.Checks}); err != nil {
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := s.o.Revise(id, req.Change); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// getPlan returns the agent's plan waiting for the user's decision.
+func (s *Server) getPlan(w http.ResponseWriter, r *http.Request) {
+	p, err := s.st.PendingPlan(r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) || err == nil && !s.o.Awaiting(p.Agent) {
+		http.Error(w, "no plan is waiting for a decision", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, p)
+}
+
+// decidePlan approves (possibly edited), sends back, or cancels the agent's waiting plan.
+func (s *Server) decidePlan(w http.ResponseWriter, r *http.Request) {
+	var d orch.Decision
+	if !readJSON(w, r, &d) {
+		return
+	}
+	if err := s.o.Decide(r.PathValue("id"), d); errors.Is(err, orch.ErrStale) {
+		fail(w, http.StatusConflict, err)
+		return
+	} else if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// continueRun picks a blocked manager's run back up (see Orchestrator.Continue).
+func (s *Server) continueRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.o.Continue(r.PathValue("id")); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
@@ -179,7 +276,7 @@ func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// runAll starts every top-level agent that has a goal; managers run their own subtrees.
+// runAll starts every top-level agent's goals; managers run their own subtrees.
 func (s *Server) runAll(w http.ResponseWriter, r *http.Request) {
 	as, err := s.st.Agents(r.PathValue("id"))
 	if err != nil {
@@ -188,10 +285,10 @@ func (s *Server) runAll(w http.ResponseWriter, r *http.Request) {
 	}
 	started, errs := 0, []string{}
 	for _, a := range as {
-		if g, _ := s.st.Goal(a.ID); a.Parent != "" || g.Title == "" {
-			continue
+		if _, err := s.st.NextQueueItem(a.ID); a.Parent != "" || err != nil {
+			continue // a report, or no goals to run
 		}
-		if err := s.o.Start(a.ID); err != nil {
+		if err := s.o.StartQueue(a.ID); err != nil {
 			errs = append(errs, err.Error())
 		} else {
 			started++
@@ -207,6 +304,16 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, es)
+}
+
+// runs lists the agent's process calls with their time and tokens, for the Logs tab.
+func (s *Server) runs(w http.ResponseWriter, r *http.Request) {
+	rs, err := s.st.Runs(r.PathValue("id"), 500)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, rs)
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +398,9 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 			return
 		case b := <-c:
 			fmt.Fprintf(w, "data: %s\n\n", b)
+			if s.o.Hub.Dropped(c) {
+				fmt.Fprint(w, "data: {\"type\":\"resync\"}\n\n") // it missed updates: reload the state
+			}
 			flusher.Flush()
 		}
 	}

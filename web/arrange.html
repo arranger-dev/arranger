@@ -11,17 +11,18 @@
 :root {
   --bg: #f4f5f8; --grid: #0b0d140b; --panel: #fff; --sunk: #f0f1f3; --line: #dcdde1; --text: #1b1c1f; --muted: #6b7079;
   --accent: #3d6fe0; --on-accent: #fff; --drop: #3d6fe01f;
-  --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44;
-  --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079;
+  --manager: #8a5cf6; --coder: #3d6fe0; --reviewer: #c98a12; --tester: #2f9e44; --writer: #0e8fa0; --pm: #c2418f;
+  --idle: #a0a4ab; --running: #3d6fe0; --verifying: #c98a12; --done: #2f9e44; --failed: #d64545; --stopped: #6b7079; --awaiting: #d9730d;
   --add-bg: #e6f4ea; --del-bg: #fdecec; --link: #8b919c;
   font: 14px/1.4 var(--sans);
 }
 [data-theme=dark] {
   --bg: #0e0f12; --grid: #c0caf509; --panel: #16181d; --sunk: #111317; --line: #2a2d35; --text: #e6e6e6; --muted: #8a8f98;
   --accent: #7aa2f7; --on-accent: #0e0f12; --drop: #7aa2f733;
-  --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a;
-  --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98;
+  --manager: #bb9af7; --coder: #7aa2f7; --reviewer: #e0af68; --tester: #9ece6a; --writer: #7dcfff; --pm: #f5a3cf;
+  --idle: #5c616b; --running: #7aa2f7; --verifying: #e0af68; --done: #9ece6a; --failed: #f7768e; --stopped: #8a8f98; --awaiting: #ff9e64;
   --add-bg: #1f2d22; --del-bg: #331f24; --link: #6b7280;
+  --card: #1d2027; --card-line: #3a3f4b; --card-shadow: 0 1px 0 #ffffff08 inset, 0 2px 8px #0006;
 }
 * { box-sizing: border-box; border-radius: 0; }
 body { margin: 0; color: var(--text); background: var(--bg); display: grid; grid-template: auto 1fr / 180px 1fr auto; height: 100vh; overflow: hidden; }
@@ -34,25 +35,64 @@ button { background: var(--panel); border: 1px solid var(--line); padding: 5px 1
 button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button.danger { color: var(--failed); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:disabled:hover { border-color: var(--line); }
+button.primary.danger { background: var(--failed); border-color: var(--failed); color: #fff; }
 input, select, textarea { background: var(--panel); border: 1px solid var(--line); padding: 6px 8px; width: 100%; }
 textarea { resize: vertical; min-height: 60px; }
 .mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
 label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
 
-header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; padding: 7px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+header button.icon { width: 30px; padding: 5px 0; text-align: center; color: var(--muted); }
+header button.icon:hover { color: var(--text); }
+header .proj { display: flex; }
+header .proj > * + * { margin-left: -1px; }
+.menu { position: relative; }
+.menu > summary { list-style: none; display: flex; align-items: center; gap: 8px; height: 100%; padding: 5px 10px 5px 12px; border: 1px solid var(--line);
+  background: var(--panel); cursor: pointer; user-select: none; font-weight: 600; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu > summary span { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu > summary svg { width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s; }
+.menu[open] > summary svg { transform: rotate(180deg); }
+.menu > summary:hover { border-color: var(--muted); }
+.menu ul { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 240px; max-height: 360px; overflow: auto; margin: 0; padding: 4px 0;
+  list-style: none; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 8px 24px #0003; }
+.menu li.head { padding: 6px 12px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.menu li a { display: flex; align-items: center; gap: 8px; padding: 7px 12px; color: var(--text); text-decoration: none; }
+.menu li a::before { content: ""; width: 14px; flex: none; }
+.menu li a.on { font-weight: 600; }
+.menu li a.on::before { content: "✓"; color: var(--accent); }
+.menu li a:hover, .menu li a:focus-visible { background: var(--sunk); outline: none; }
+.menu.pick > summary { justify-content: space-between; font-weight: 400; padding: 6px 10px; }
+.menu.pick > summary span { max-width: none; }
+.menu.pick ul { right: 0; min-width: 0; }
+.menu.pick li button { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none; padding: 7px 12px; }
+.menu.pick li button::before { content: ""; width: 14px; flex: none; }
+.menu.pick li button.on { font-weight: 600; }
+.menu.pick li button.on::before { content: "✓"; color: var(--accent); }
+.menu.pick li button:hover { background: var(--sunk); }
 header h1 { font: 600 14px var(--mono); margin: 0 8px 0 0; }
 header h1 a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 8px; }
 header h1 img { width: 22px; height: 22px; display: block; }
 header select { width: auto; }
 .sp { flex: 1; }
-#bar { display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--muted); }
-#bar .prog { width: 120px; height: 6px; background: var(--sunk); border: 1px solid var(--line); }
-#bar .prog i { display: block; height: 100%; background: var(--done); width: 0; }
+#bar { display: flex; align-items: stretch; height: 30px; margin-left: 8px; border: 1px solid var(--line); background: var(--sunk); font-size: 12px; color: var(--muted); }
+#bar > * { display: flex; align-items: center; gap: 6px; padding: 0 12px; white-space: nowrap; }
+#bar > * + * { border-left: 1px solid var(--line); }
+#bar > [hidden] { display: none; }
+#bar > button { border: 0; border-left: 1px solid var(--line); background: none; font-size: 12px; color: var(--muted); }
+#bar > button:hover { background: var(--panel); color: var(--text); }
 #bar b { color: var(--text); font-weight: 600; }
 #needs { position: relative; }
-#needs summary { cursor: pointer; list-style: none; color: var(--failed); font-weight: 600; }
-#needs[data-n="0"] summary { color: var(--muted); font-weight: 400; }
-#needs ul { position: absolute; top: 22px; left: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); margin: 0; padding: 4px 0; list-style: none; min-width: 220px; }
+#needs summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 6px; height: 100%; color: var(--s); font-weight: 600; }
+#needs summary::-webkit-details-marker { display: none; }
+#needs summary b { color: inherit; }
+#needs[data-n="0"] { display: none; }
+#needs, #needs[data-kind=fail] { --s: var(--failed); } #needs[data-kind=plan] { --s: var(--awaiting); }
+#needs .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--s); box-shadow: 0 0 0 0 var(--s); animation: beacon 1.4s ease-out infinite; }
+@keyframes beacon { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--s) 70%, transparent); } 100% { box-shadow: 0 0 0 7px transparent; } }
+#needs ul { position: absolute; top: 29px; left: 0; z-index: 5; background: var(--panel); border: 1px solid var(--line); margin: 0; padding: 4px 0; list-style: none; min-width: 220px; }
 #needs li { padding: 6px 12px; cursor: pointer; color: var(--text); }
 #needs li:hover { background: var(--sunk); }
 #msg { font-size: 12px; color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -75,6 +115,21 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 #links { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
 #links path { fill: none; stroke: var(--link); stroke-width: 2.5; stroke-dasharray: 2 7; stroke-linecap: round; }
 /* live links: up toward the manager while a report works for it, down while the manager hands out work */
+#links .link .hit { stroke: transparent; stroke-width: 16; stroke-dasharray: none; pointer-events: stroke; cursor: pointer; animation: none; }
+#links .link .cut { opacity: 0; pointer-events: all; cursor: pointer; transition: opacity .12s; }
+#links .link:hover .cut, #links .link .cut:focus { opacity: 1; }
+#links .link:hover > path:not(.hit) { stroke: var(--failed); }
+#links .cut circle { fill: var(--panel); stroke: var(--failed); stroke-width: 1.5; }
+#links .cut path { stroke: var(--failed); stroke-width: 2; stroke-dasharray: none; fill: none; animation: none; }
+#links path.draft { stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 5; animation: none; }
+#canvas .card .port { position: absolute; left: 50%; width: 13px; height: 13px; margin-left: -6.5px; border-radius: 50%; z-index: 3;
+  background: var(--panel); border: 2px solid var(--c, var(--accent)); opacity: 0; cursor: crosshair; transition: opacity .12s, transform .12s; }
+#canvas .card .port.down { bottom: -7px; }
+#canvas .card .port.left, #canvas .card .port.right { top: 50%; margin: -6.5px 0 0; }
+#canvas .card .port.left { left: -7px; } #canvas .card .port.right { left: auto; right: -7px; }
+#canvas .card:hover .port, #canvas.linking .card.src .port.on { opacity: 1; }
+#canvas .card .port:hover, #canvas.linking .card.src .port.on { transform: scale(1.25); }
+#canvas.linking, #canvas.linking .card { cursor: crosshair; }
 #links path.flow { stroke: var(--s); stroke-width: 3.5; animation: flow .7s linear infinite; }
 #links path.flow.down { animation-direction: reverse; }
 @keyframes flow { to { stroke-dashoffset: 18; } }
@@ -82,10 +137,13 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 #canvas .card.dragging { cursor: grabbing; z-index: 5; box-shadow: 0 6px 18px #0002; }
 #tidy { position: sticky; float: right; top: 12px; right: 12px; margin: 12px; z-index: 4; }
 
-.card { position: relative; display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--panel); border: 1px solid var(--line);
+.card { position: relative; display: inline-grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; background: var(--card, var(--panel)); border: 1px solid var(--card-line, var(--line)); box-shadow: var(--card-shadow, none);
   border-left: 3px solid var(--c, var(--accent)); padding: 10px 14px; cursor: grab; user-select: none; width: 210px; }
 .card:hover { border-color: var(--muted); border-left-color: var(--c); }
 .card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
+.card.picked { outline: 2px solid var(--accent); outline-offset: 2px; background: color-mix(in srgb, var(--accent) 8%, var(--card, var(--panel))); }
+#marquee { position: absolute; z-index: 4; pointer-events: none; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+main.can-pan, main.can-pan .card { cursor: grab; }
 .card.drop { outline: 2px dashed var(--accent); background: var(--drop); }
 .card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .x { color: var(--muted); cursor: pointer; }
@@ -102,23 +160,29 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 .card.busy .now { color: var(--text); }
 .card .elapsed { color: var(--s); font-weight: 600; }
 @keyframes sweep { from { background-position: -60% 0; } to { background-position: 160% 0; } }
-#bar .live { display: inline-block; width: 8px; height: 8px; background: var(--running); margin-right: 4px; vertical-align: middle; animation: pulse 1s infinite alternate; }
-#bar .live[hidden] { display: none; }
+#bar .live { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--running); animation: pulse 1s infinite alternate; }
 @media (prefers-reduced-motion: reduce) {
   #links path.flow { animation: none; }
   .card.busy::after { animation: none; background: var(--s); }
-  .st::before, #bar .live { animation: none !important; }
+  .st::before, #bar .live, #needs .dot { animation: none !important; }
 }
 .st::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 5px; background: var(--s, var(--idle)); }
 .busy .st::before, .st.busy::before { animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .3; } }
 [data-status=starting], [data-status=running] { --s: var(--running); } [data-status=verifying] { --s: var(--verifying); } [data-status=done] { --s: var(--done); }
 [data-status=failed], [data-status=blocked] { --s: var(--failed); } [data-status=stopped] { --s: var(--stopped); }
-[data-status=planning], [data-status=waiting], [data-status=reviewing] { --s: var(--manager); }
+[data-status=planning], [data-status=waiting], [data-status=reviewing], [data-status=fixing] { --s: var(--manager); }
+[data-status=awaiting] { --s: var(--awaiting); }
+.card[data-status=awaiting] { border-color: var(--s); border-left-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s) 22%, transparent); }
+.card[data-status=awaiting] .st::before, .st[data-status=awaiting]::before { animation: pulse 1s infinite alternate; }
+.card.proposed .now { font-style: italic; opacity: .75; }
+.card.left-out { opacity: .45; }
 .ok { color: var(--done); } .bad { color: var(--failed); }
-[data-role=manager] { --c: var(--manager); } [data-role=coder] { --c: var(--coder); }
+[data-role=manager] { --c: var(--manager); } [data-role=programmer], [data-role=coder] { --c: var(--coder); }
 [data-role=reviewer] { --c: var(--reviewer); } [data-role=tester] { --c: var(--tester); }
+[data-role=writer] { --c: var(--writer); } [data-role=product-manager] { --c: var(--pm); }
 aside .card { display: grid; width: 100%; margin-bottom: 8px; }
+aside .card .name { white-space: normal; overflow: visible; line-height: 1.25; }
 
 
 #inspector { width: var(--iw, min(560px, 45vw)); min-width: 320px; max-width: 85vw; border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; position: relative; }
@@ -133,7 +197,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .istats .warn { color: var(--verifying); } .istats .over { color: var(--failed); }
 #inspector[hidden] { display: none; }
 .ihead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
-.ihead .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ihead .name { font-weight: 600; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#i-dir { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); color: var(--muted); cursor: copy; }
 .tabs { display: flex; border-bottom: 1px solid var(--line); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 8px 14px; color: var(--muted); }
 .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
@@ -142,18 +207,94 @@ body.resizing { cursor: col-resize; user-select: none; }
 .row { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
 .feedback { white-space: pre-wrap; background: var(--del-bg); border: 1px solid var(--line); padding: 8px; max-height: 200px; overflow: auto; }
 
-#log { font: 12px/1.5 var(--mono); padding-top: 8px; }
-#log .ev { display: grid; grid-template-columns: 64px 48px 1fr; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--sunk); cursor: default; }
-#log .ev[data-raw] { cursor: pointer; }
-#log .t { color: var(--muted); }
-#log .k { color: var(--muted); }
-#log .x { white-space: pre-wrap; word-break: break-word; }
-#log .ev[data-kind=error] .x, #log .ev[data-kind=error] .k { color: var(--failed); }
-#log .ev[data-kind=done] .k, #log .ev[data-kind=file] .k { color: var(--done); }
-#log .ev[data-kind=tool] .k { color: var(--accent); }
-#log .ev[data-kind=stderr] .x { color: var(--muted); }
-#log pre { grid-column: 1 / -1; margin: 4px 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all; }
 
+/* logs: one section per run, outcome first */
+#log-now { display: flex; align-items: center; gap: 2px; margin: 12px 0 0; padding: 7px 10px; border: 1px solid var(--s); border-left-width: 3px;
+  background: color-mix(in srgb, var(--s) 8%, var(--panel)); font-size: 13px; }
+#log-now[hidden] { display: none; }
+#log-now-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 4px; }
+.lchips { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; }
+.lchips button { padding: 3px 9px; font-size: 12px; color: var(--muted); }
+.lchips button b { font-weight: 600; color: var(--text); margin-left: 4px; }
+.lchips button.on { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+#log-search { width: 130px; padding: 4px 8px; font-size: 12px; }
+.lbar .check { font-size: 12px; color: var(--muted); }
+#log { padding: 4px 0 20px; }
+#log .empty { color: var(--muted); font-size: 13px; padding: 16px 0; }
+.lrun { border: 1px solid var(--line); background: var(--panel); margin-top: 10px; }
+.lrun > summary { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; list-style: none; font-size: 13px; }
+.lrun > summary::-webkit-details-marker { display: none; }
+.lrun > summary::before { content: ""; width: 6px; height: 6px; flex: none; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform .12s; }
+.lrun[open] > summary::before { transform: rotate(45deg); }
+.lrun .lstate { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; color: var(--s); }
+.lrun .lstate::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--s); }
+.lrun[data-state=running] .lstate::before, .lrun[data-state=awaiting] .lstate::before { animation: pulse 1s infinite alternate; }
+.lrun .lwhen { color: var(--text); }
+.lrun .lmeta { color: var(--muted); font-size: 12px; margin-left: auto; white-space: nowrap; }
+.lrun[data-state=done] { --s: var(--done); } .lrun[data-state=failed], .lrun[data-state=blocked] { --s: var(--failed); }
+.lrun[data-state=stopped], .lrun[data-state=other] { --s: var(--stopped); } .lrun[data-state=running] { --s: var(--running); }
+.lrun[data-state=awaiting] { --s: var(--awaiting); }
+.lbody { padding: 0 12px 12px; border-top: 1px solid var(--sunk); }
+.lask { margin: 10px 0 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--sunk); font-size: 13px; }
+.lask b { color: var(--muted); font-weight: 400; }
+.lout { margin: 10px 0 0; font-size: 14px; font-weight: 600; color: var(--s); line-height: 1.4; }
+.lnext { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
+#revise-dialog { width: min(520px, 94vw); }
+#get-started { width: 100%; margin-top: 8px; }
+#empty-canvas { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); z-index: 2; display: grid; justify-items: center; gap: 8px;
+  padding: 24px 28px; background: var(--panel); border: 1px dashed var(--line); text-align: center; color: var(--muted); }
+#empty-canvas[hidden] { display: none; }
+#empty-canvas b { color: var(--text); font-size: 15px; }
+#setup-dialog { width: min(720px, 94vw); }
+#setup-dialog h4 { margin: 18px 0 6px; font-size: 14px; }
+.su-tool { display: grid; grid-template-columns: 90px 1fr; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--sunk); font-size: 13px; }
+.su-tool .name { font-weight: 600; }
+.su-tool .ok { color: var(--done); } .su-tool .no { color: var(--muted); }
+.su-tool .cmds { grid-column: 2; display: grid; gap: 4px; }
+.su-cmd { display: flex; align-items: center; gap: 8px; }
+.su-cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; background: var(--sunk); padding: 4px 8px; font: 12px var(--mono); }
+.su-cmd span { width: 44px; color: var(--muted); font-size: 12px; }
+.su-cmd button, .su-team button { padding: 3px 10px; font-size: 12px; }
+#su-msg:empty { display: none; }
+#su-teams { margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.su-team { border: 1px solid var(--line); padding: 10px 12px; display: grid; gap: 4px; align-content: start; font-size: 13px; }
+.su-team b { font-size: 14px; }
+.su-team .hint { margin: 0; }
+.su-team .row { margin-top: 6px; flex-wrap: wrap; gap: 6px; }
+.su-team .row button { white-space: nowrap; }
+#su-checks { display: flex; flex-wrap: wrap; gap: 6px; }
+.suggest { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.suggest:empty { display: none; }
+.suggest button, #su-checks span { font: 12px var(--mono); padding: 2px 8px; }
+#su-checks span { border: 1px solid var(--line); background: var(--sunk); }
+#su-checks i { font: 12px var(--sans); color: var(--muted); font-style: normal; margin-left: 6px; }
+.lout code, .lchk code { font: 12px var(--mono); }
+.lact { margin: 4px 0 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
+.lchk { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; }
+.lchk > li { display: grid; grid-template-columns: 16px 1fr; gap: 6px; align-items: start; font-size: 13px; }
+.lchk > li > code { min-width: 0; white-space: pre-wrap; word-break: break-all; }
+.lchk .lkey { grid-column: 2; font: 12px var(--mono); color: var(--failed); white-space: pre-wrap; word-break: break-word; }
+.lchk details { grid-column: 2; font-size: 12px; color: var(--muted); }
+.lchk summary { cursor: pointer; }
+.ltime { list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px dashed var(--line); padding-top: 8px; display: grid; gap: 2px; }
+.lrow { display: grid; grid-template-columns: 44px 16px 1fr; gap: 6px; align-items: start; padding: 3px 0; font-size: 13px; line-height: 1.45; }
+.lrow .lt { font: 11px/1.9 var(--mono); color: var(--muted); text-align: right; }
+.lrow .lx { min-width: 0; white-space: pre-wrap; word-break: break-word; }
+.lrow .lx code { font: 12px var(--mono); }
+.lrow .lx.one { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.lrow .lx.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.lrow details summary { cursor: pointer; color: var(--text); }
+.lrow details ul { margin: 4px 0 0; padding-left: 16px; font: 12px/1.6 var(--mono); color: var(--muted); }
+.lrow[data-k=error] .lx { color: var(--failed); } .lrow[data-k=warn] .lx { color: var(--verifying); }
+.lrow[data-k=msg] .lx, .lrow[data-k=answer] .lx { color: var(--text); }
+.lrow[data-k=tool] .lx, .lrow[data-k=file] .lx, .lrow[data-k=check] .lx, .lrow[data-k=other] .lx { color: var(--muted); }
+.lrow pre, .lchk pre { margin: 6px 0 0; padding: 8px; background: var(--sunk); overflow: auto; max-height: 280px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; }
+.ldiv { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; font-size: 12px; color: var(--muted); }
+.ldiv b { color: var(--text); font-weight: 600; white-space: nowrap; }
+.ldiv::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+svg.li { width: 14px; height: 14px; margin-top: 3px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: var(--muted); }
+svg.li.ok { color: var(--done); } svg.li.bad { color: var(--failed); } svg.li.mgr { color: var(--manager); } svg.li.you { color: var(--accent); } svg.li.warn { color: var(--verifying); }
 #diff-stat.live::after { content: " · live"; color: var(--running); font-weight: 600; }
 #diff-stat.live:empty::after { content: "live"; }
 .file { border: 1px solid var(--line); margin-top: 10px; }
@@ -185,12 +326,70 @@ body.resizing { cursor: col-resize; user-select: none; }
 .radios small { color: var(--muted); }
 #m-preview { font-size: 13px; margin-top: 12px; display: grid; gap: 6px; }
 #m-preview ul { margin: 0; padding-left: 18px; font: 12px var(--mono); }
-#log .ev[data-kind=plan] .k, #log .ev[data-kind=verdict] .k { color: var(--manager); }
-#log .ev[data-kind=request] .k, #log .ev[data-kind=request] .x { color: var(--accent); font-weight: 600; }
 /* the way to iterate once an agent has run: say what should change, re-run only what it concerns */
-#revise { margin-top: 14px; padding: 4px 12px 10px; background: var(--sunk); border: 1px solid var(--line); border-left: 3px solid var(--accent); }
-#revise label { color: var(--text); font-weight: 600; font-size: 13px; }
-#revise .hint { margin-top: 6px; }
+#g-working { display: flex; align-items: center; gap: 2px; margin-top: 14px; padding: 8px 12px; border: 1px solid var(--s); border-left-width: 3px;
+  background: color-mix(in srgb, var(--s) 8%, var(--panel)); font-weight: 600; }
+#g-working[hidden] { display: none; }
+.help { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; font-size: 12px; line-height: 1.35; color: var(--muted); }
+.help li { display: flex; gap: 8px; align-items: flex-start; }
+.help svg { width: 14px; height: 14px; flex: none; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#queue { margin-top: 16px; }
+#q-actions { margin-top: 8px; }
+#q-actions[hidden] { display: none; }
+#run-dialog { width: min(560px, 94vw); }
+#run-goals { margin: 12px 0 0; padding-left: 22px; display: grid; gap: 10px; max-height: 50vh; overflow: auto; }
+#run-goals li b { font-weight: 600; }
+#run-goals .rg { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+#run-goals .rg code { font: 12px var(--mono); color: var(--text); }
+.qhead { display: flex; align-items: center; gap: 8px; }
+.qhead h4 { margin: 0; font-size: 14px; }
+.qhead .hint { margin: 0; }
+#queue > .hint { margin-top: 4px; }
+#q-items { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; counter-reset: q; }
+.qi { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+#q-items .qi { counter-increment: q; }
+#q-items .qi::before { content: counter(q); width: 16px; color: var(--muted); font: 12px var(--mono); text-align: right; }
+.qi .grip { width: 12px; height: 16px; cursor: grab; color: var(--muted); flex: none; }
+.qi.dragging { opacity: .4; }
+.qi .qt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qi .qm { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.qi[data-status=running] { border-color: var(--running); }
+.qi[data-status=running] .qm { color: var(--running); font-weight: 600; }
+.qi .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--s, var(--idle)); }
+.qi[data-status=done] { --s: var(--done); } .qi[data-status=failed], .qi[data-status=blocked] { --s: var(--failed); }
+.qi[data-status=stopped], .qi[data-status=skipped] { --s: var(--stopped); } .qi[data-status=running] { --s: var(--running); }
+.qi .menu > summary { padding: 0 6px; border: 0; background: none; font-weight: 400; color: var(--muted); letter-spacing: 1px; }
+.qi .menu ul { left: auto; right: 0; min-width: 150px; }
+.qi .menu li button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 7px 12px; }
+.qi .menu li button:hover { background: var(--sunk); }
+.qi .menu li button.danger { color: var(--failed); }
+.qi button.link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 12px; white-space: nowrap; }
+.qi.fin { flex-wrap: wrap; row-gap: 4px; }
+.qi.fin > svg.li { margin-top: 0; }
+.qi.fin .qa { display: flex; flex-wrap: wrap; gap: 4px 14px; width: 100%; padding-left: 46px; }
+.qi.fin[data-status=skipped] .qt, .qi.fin[data-status=stopped] .qt { color: var(--muted); }
+#q-form { margin-top: 10px; padding: 4px 12px 12px; background: var(--sunk); border: 1px solid var(--line); }
+.qfail { margin-top: 12px; font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.card .badges .q { color: var(--accent); }
+label.check { display: flex; gap: 6px; align-items: center; font-weight: 400; color: var(--text); }
+label.check input { width: auto; margin: 0; padding: 0; accent-color: var(--accent); }
+label.check input[type=radio] { appearance: auto; -webkit-appearance: radio; width: 14px; height: 14px; border: 0; background: none; }
+#g-approve-row { margin-top: 10px; }
+#g-working-note { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+#g-working-note:empty { display: none; }
+#g-working .st::before { width: 9px; height: 9px; margin-right: 8px; border-radius: 50%; }
+#plan-review { margin-top: 14px; padding: 4px 12px 12px; background: var(--sunk); border: 1px solid var(--line); border-left: 3px solid var(--awaiting); }
+#plan-review h3 { margin: 8px 0 2px; font-size: 14px; }
+#plan-review .pr-item { background: var(--panel); border: 1px solid var(--line); margin-top: 8px; }
+#plan-review .pr-item > summary { display: flex; gap: 8px; align-items: center; padding: 6px 10px; cursor: pointer; }
+#plan-review .pr-item > summary .who { font-weight: 600; white-space: nowrap; }
+#plan-review .pr-item > summary .what { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#plan-review .pr-item .fields { padding: 0 10px 10px; }
+#plan-review .pr-item.out { display: flex; gap: 8px; align-items: center; padding: 6px 10px; color: var(--muted); }
+#plan-review .pr-item.out .who { font-weight: 600; color: var(--text); }
+#plan-review .pr-item.out .what { flex: 1; }
+#plan-review .warn { color: var(--awaiting); font-size: 12px; margin: 6px 0 0; }
+#plan-review .row { flex-wrap: wrap; }
 
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 20px; width: min(460px, 92vw); }
 dialog::backdrop { background: #0006; }
@@ -217,27 +416,33 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <span class="meta"><span class="st"></span><span class="role"></span> · <span class="rt"></span></span>
     <span class="now"></span>
     <span class="badges"></span>
+    <span class="port down" title="Drag onto another agent to make it report to this one"></span>
+    <span class="port left" title="Drag onto another agent to connect them; the higher box manages"></span>
+    <span class="port right" title="Drag onto another agent to connect them; the higher box manages"></span>
   </div>
 </template>
 
 <header>
   <h1><a href="/arrange"><img src="/arranger.png" alt="">arranger</a></h1>
-  <select id="project" aria-label="Project">
-    {{range .Projects}}<option value="{{.ID}}" {{if eq .ID $.Project.ID}}selected{{end}}>{{.Name}}</option>{{end}}
-  </select>
-  <button id="new-project" title="New project">+ New</button>
-  <button id="edit-project" title="Project settings">Settings</button>
+  <div class="proj">
+    <details id="project" class="menu">
+      <summary aria-label="Switch project"><span>{{.Project.Name}}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></summary>
+      <ul>
+        <li class="head">Projects</li>
+        {{range .Projects}}<li><a href="/arrange?p={{.ID}}"{{if eq .ID $.Project.ID}} class="on" aria-current="page"{{end}}>{{.Name}}</a></li>{{end}}
+      </ul>
+    </details>
+    <button id="new-project" class="icon" title="New project" aria-label="New project">+</button>
+    <button id="edit-project" class="icon" title="Project settings" aria-label="Project settings">⚙</button>
+  </div>
   <div id="bar">
-    <span class="prog"><i></i></span>
-    <span><b id="n-done">0</b>/<b id="n-goals">0</b> done</span>
-    <span><span class="live" hidden></span><b id="n-running">0</b> running</span>
-    <details id="needs" data-n="0"><summary>Needs you (<span id="n-needs">0</span>)</summary><ul></ul></details>
-    <span>$<b id="cost">0.00</b></span>
+    <span id="running" hidden><span class="live"></span><b id="n-running">0</b> running</span>
+    <details id="needs" data-n="0"><summary><span class="dot"></span><span>Needs you (<b id="n-needs">0</b>)</span></summary><ul></ul></details>
+    <button id="stats" title="Stats: tokens, time and success across the project"><b id="tokens">0</b> tokens</button>
   </div>
   <span class="sp"></span>
   <span id="msg"></span>
-  <button id="stats" title="Cost, time and success across the project">Stats</button>
-  <button id="theme" title="Toggle theme">◐</button>
+  <button id="theme" class="icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
   <button id="save">Save</button>
   <button id="run-all" class="primary">Run all</button>
 </header>
@@ -245,31 +450,46 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 <aside id="palette">
   <h2>Agent types</h2>
   <div class="card" draggable="true" data-role="manager" data-new><span class="name">Manager</span><span class="meta">manager</span></div>
-  <div class="card" draggable="true" data-role="coder" data-new><span class="name">Coder</span><span class="meta">coder</span></div>
-  <div class="card" draggable="true" data-role="reviewer" data-new><span class="name">Reviewer</span><span class="meta">reviewer</span></div>
+  <div class="card" draggable="true" data-role="product-manager" data-new><span class="name">Product Manager</span><span class="meta">product-manager</span></div>
+  <div class="card" draggable="true" data-role="programmer" data-new><span class="name">Programmer</span><span class="meta">programmer</span></div>
   <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
+  <div class="card" draggable="true" data-role="writer" data-new><span class="name">Technical Content Writer</span><span class="meta">writer</span></div>
   <div id="custom-types"></div>
-  <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
-  <p class="hint">Drag a type onto the canvas to add an agent, or onto an agent to put it under that agent. Drag boxes to move them, or empty space to pan; drop one on another to change who it reports to. Double-click to rename.</p>
+  <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New custom type</button>
+  <button id="get-started" title="Start from a ready team, check your agent tools, and find checks for your repo">Teams &amp; Tools</button>
+  <ul class="help">
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Drag a type onto the canvas to add an agent</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v7a4 4 0 0 0 4 4h12M15 10l5 5-5 5"/></svg><span>Drop it on an agent to put it under that agent</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3v12a4 4 0 0 1-4 4H4M8 15l-4 4 4 4M17 3l-4 4M17 3l4 4"/></svg><span>Drop a box on another to change its manager</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v8M12 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM12 16a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"/></svg><span>Drag a box's dots to another agent to connect them</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg><span>Hover a connection and click its × to remove it</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg><span>Double-click a box to rename it</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM18 9l-6 6M12 9l6 6"/></svg><span>Drag on empty space (or ⌘/Ctrl+A) to select boxes; Backspace removes them</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg><span>Hold Space and drag, or scroll, to move around</span></li>
+  </ul>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
   <span class="grow"></span>
   {{with .Version}}<p class="about" id="version" title="{{.String}}{{if .Commit}}&#10;commit {{.Commit}}{{end}}">
     <b>arranger {{if .ReleaseURL}}<a href="{{.ReleaseURL}}" target="_blank" rel="noopener" title="Release notes">{{.Version}}</a>{{else}}{{.Version}}{{end}}</b>
-    {{if .Short}}<br>commit {{if .CommitURL}}<a href="{{.CommitURL}}" target="_blank" rel="noopener">{{.Short}}</a>{{else}}{{.Short}}{{end}}{{if .Dirty}}<span class="bad">+dirty</span>{{end}}{{end}}
+    {{if .Short}}<br>commit {{if .CommitURL}}<a href="{{.CommitURL}}" target="_blank" rel="noopener">{{.Short}}</a>{{else}}{{.Short}}{{end}}{{end}}
     {{if .When}}<br>{{.When}}{{end}}
     <br>{{.Go}} · <a href="{{$.Repo}}/releases" target="_blank" rel="noopener">all releases</a>
   </p>{{end}}
 </aside>
 
-<main><button id="tidy" title="Lay the boxes out as a tree again">Tidy up</button><div id="canvas"><svg id="links"></svg></div></main>
+<main><button id="tidy" title="Lay the boxes out as a tree again">Tidy up</button>
+  <div id="empty-canvas" hidden><b>No agents yet.</b><span>Drag an agent type from the left, or</span><button type="button" class="primary" id="empty-start">Start from a ready team</button></div>
+  <div id="canvas"><svg id="links"></svg></div></main>
 
 <aside id="inspector" hidden>
   <div id="resize" title="Drag to resize"></div>
   <div class="ihead">
     <span class="st" id="i-status" data-status="idle"></span>
     <span class="name" id="i-name"></span>
+    <span id="i-dir"></span>
     <button id="i-clone" title="Add a copy of this agent (same settings and manager, no goal)">Clone</button>
     <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
+    <button id="i-continue" class="primary" hidden title="Pick the run up where it stopped: finished reports keep their work, the others run again, then everything is reviewed and merged">Continue</button>
     <button id="i-run" class="primary">Run</button>
     <button id="i-stop" class="danger">Stop</button>
     <button id="i-close" title="Close">×</button>
@@ -280,24 +500,56 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <button data-tab="goal" class="on">Goal</button><button data-tab="logs">Logs</button><button data-tab="diff">Diff</button><button data-tab="settings">Settings</button>
   </div>
   <form class="pane" data-pane="goal" id="goal-form">
-    <div id="revise" hidden>
-      <label for="r-change">Request changes</label>
-      <textarea id="r-change" rows="3" placeholder="What should be different? e.g. Webhooks should retry 3 times; the checkout button should say Subscribe."></textarea>
-      <p class="hint" id="r-hint"></p>
-      <div class="row"><button type="button" class="primary" id="r-go">Run with these changes</button><span class="hint" style="margin:0">⌘/Ctrl + Enter</span></div>
-      <p class="status" id="r-msg" role="status"></p>
+    <div id="g-working" hidden><span class="st busy" id="g-working-dot"></span><span><span id="g-working-text"></span><span id="g-working-note"></span></span></div>
+    <div id="plan-review" hidden>
+      <h3 id="pr-title"></h3>
+      <p class="hint" id="pr-sub" style="margin-top:0"></p>
+      <div id="pr-items"></div>
+      <label for="pr-feedback">Feedback on the plan (optional)</label>
+      <textarea id="pr-feedback" rows="2" placeholder="What should the new plan do differently? e.g. Give the database work to DB Coder."></textarea>
+      <div class="row">
+        <button type="button" class="primary" id="pr-approve">Approve and run</button>
+        <button type="button" id="pr-replan">Plan again with feedback</button>
+        <span class="sp" style="flex:1"></span>
+        <button type="button" class="danger" id="pr-cancel">Cancel</button>
+      </div>
+      <p class="status" id="pr-msg" role="status"></p>
     </div>
+    <section id="queue" hidden>
+      <div class="qhead"><h4>Goals</h4><span class="hint" id="q-state"></span></div>
+      <p class="hint" id="q-hint">Add the goals you want done. Run works through them one after another, each on the code the one before it left, with its own plan, checks and log.</p>
+      <ol id="q-items"></ol>
+      <div id="q-form" hidden>
+        <label for="qf-title">Goal</label><input id="qf-title" placeholder="Add rate limiting to /login">
+        <label for="qf-body">Details</label><textarea id="qf-body" rows="2" placeholder="Context the agent needs"></textarea>
+        <label for="qf-criteria">Acceptance criteria</label><textarea id="qf-criteria" rows="2" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
+        <label for="qf-checks">Checks: one shell command per line, all must exit 0</label><textarea id="qf-checks" class="mono" rows="2" placeholder="go test ./..."></textarea>
+        <div class="suggest" id="qf-suggest"></div>
+        <div class="row"><button type="button" class="primary" id="qf-save">Add goal</button><button type="button" id="qf-cancel">Cancel</button></div>
+      </div>
+      <div class="row" id="q-actions"><button type="button" id="q-add">+ Add goal</button></div>
+      <p class="status" id="q-msg" role="status"></p>
+    </section>
+    <div id="g-single">
     <label>Goal</label><input name="title" placeholder="Add rate limiting to /login" required>
     <label>Details</label><textarea name="body" placeholder="Context the agent needs"></textarea>
     <label>Acceptance criteria</label><textarea name="criteria" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
     <label>Checks: one shell command per line, all must exit 0</label><textarea name="checks" class="mono" placeholder="go test ./..."></textarea>
-    <p id="g-hint" class="hint"></p>
+    <div class="suggest" id="g-suggest"></div>
     <div id="g-feedback" hidden><label>Last failure</label><div class="feedback mono"></div></div>
     <div class="row"><button class="primary">Save goal</button><span id="g-state" class="hint" style="margin:0"></span></div>
     <p class="status" id="g-msg" role="status"></p>
+    </div>
+    <p id="g-hint" class="hint"></p>
+    <label id="g-approve-row" class="check"><input type="checkbox" id="g-approve"> Let me approve the plan before the team runs</label>
   </form>
   <div class="pane" data-pane="logs" hidden>
-    <div class="row"><label style="margin:0;display:flex;gap:6px;align-items:center;width:auto"><input type="checkbox" id="raw" style="width:auto"> show raw output</label></div>
+    <div id="log-now" hidden><span class="st busy" id="log-now-dot"></span><span id="log-now-text"></span></div>
+    <div class="lbar">
+      <div class="lchips" id="log-filters" role="toolbar" aria-label="Show"></div>
+      <input id="log-search" type="search" placeholder="Search" aria-label="Search the log">
+      <label class="check" title="Also show raw tool output, stderr and internal messages"><input type="checkbox" id="raw"> Everything</label>
+    </div>
     <div id="log"></div>
   </div>
   <div class="pane" data-pane="diff" hidden>
@@ -323,6 +575,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <div class="colorrow"><input type="color" name="color" id="a-color"><button type="button" id="a-color-reset">Use role color</button></div>
     <label>Extra CLI args (optional)</label><input name="args" class="mono" placeholder="--allowedTools Bash  (generic: the whole command)">
     <label>Instructions</label><textarea name="prompt" rows="6" placeholder="How this agent should work"></textarea>
+    <label id="a-approve-row" style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" name="approvePlan" style="width:auto"> Let me approve the plan before the team runs</label>
     <div class="pair">
       <div><label>Soft token limit (warns)</label><input name="tokenSoft" type="number" min="0" step="1000" placeholder="none"></div>
       <div><label>Hard token limit (stops)</label><input name="tokenHard" type="number" min="0" step="1000" placeholder="none"></div>
@@ -372,10 +625,59 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
       <label><input type="radio" name="strategy" value="squash"> Squash <small>one commit with all the changes</small></label>
       <label><input type="radio" name="strategy" value="ff" id="m-ff"> Fast-forward only <small>no merge commit</small></label>
     </div>
-    <label>Commit message</label><input name="message">
+    <label>Commit message</label><textarea name="message" rows="5" placeholder="Lists every change it brings in"></textarea>
     <div id="m-preview"></div>
     <div class="row"><button class="primary" value="merge" id="m-go">Merge</button><button value="cancel" formnovalidate>Close</button></div>
     <p class="status" id="m-msg" role="status"></p>
+  </form>
+</dialog>
+
+<dialog id="confirm-dialog">
+  <form method="dialog">
+    <h3></h3>
+    <p class="hint" id="c-text"></p>
+    <input id="c-input" hidden maxlength="60" aria-label="Name">
+    <div class="row"><button class="primary danger" value="ok" id="c-ok"></button><button value="cancel" id="c-cancel"></button></div>
+  </form>
+</dialog>
+
+<dialog id="setup-dialog">
+  <form method="dialog">
+    <div class="row" style="margin:0"><h3 style="flex:1">Teams &amp; Tools</h3><button value="close">Close</button></div>
+    <h4>1. Start from a ready team</h4>
+    <div class="row" style="margin-top:0"><input id="su-name" placeholder="Name, e.g. My feature team"><button type="button" id="su-save">Save this canvas as a template</button></div>
+    <p class="status" id="su-msg" role="status"></p>
+    <div id="su-teams"></div>
+    <h4>2. Agent tools on this machine</h4>
+    <p class="hint" style="margin-top:0">Arranger drives these command-line tools. Install at least one and sign in to it once in a terminal.</p>
+    <div id="su-tools"></div>
+    <h4>3. Checks for this repo</h4>
+    <p class="hint" style="margin-top:0">A goal is done only when its checks pass. These fit this repo; they're offered under every Checks box, one click to add.</p>
+    <div id="su-checks"></div>
+  </form>
+</dialog>
+
+<dialog id="revise-dialog">
+  <form method="dialog" id="revise-form">
+    <h3></h3>
+    <label for="r-change" style="margin-top:6px">What should be different?</label>
+    <textarea id="r-change" rows="4" placeholder="e.g. Webhooks should retry 3 times; the checkout button should say Subscribe."></textarea>
+    <p class="hint" id="r-hint" style="margin-top:6px"></p>
+    <div class="row"><button type="button" class="primary" id="r-go">Run with these changes</button><button value="cancel" formnovalidate>Cancel</button><span class="hint" style="margin:0">⌘/Ctrl + Enter</span></div>
+    <p class="status" id="r-msg" role="status"></p>
+  </form>
+</dialog>
+
+<dialog id="run-dialog">
+  <form method="dialog" id="run-form">
+    <h3></h3>
+    <p class="hint" style="margin-top:0">They run one after another, each on the code the one before it left. Each gets its own plan, checks and log.</p>
+    <ol id="run-goals"></ol>
+    <div class="qfail">If a goal fails:
+      <label class="check"><input type="radio" name="run-onfail" value="pause"> stop there</label>
+      <label class="check"><input type="radio" name="run-onfail" value="skip"> go on with the next goal</label>
+    </div>
+    <div class="row"><button class="primary" value="run" id="run-go"></button><button value="cancel" formnovalidate>Cancel</button></div>
   </form>
 </dialog>
 
@@ -388,7 +690,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
 
 <div id="stale" hidden>Arranger was restarted with new code. <button id="reload">Reload page</button></div>
 
-<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.AGENTS = {{.Agents}}; window.BUILD = {{.Build}};</script>
+<script>window.PROJECT = {{.Project}}; window.TYPES = {{.Types}}; window.ROLES = {{.Roles}}; window.AGENTS = {{.Agents}}; window.BUILD = {{.Build}};</script>
 <script src="/app.js"></script>
 </body>
 </html>

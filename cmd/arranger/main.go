@@ -23,7 +23,7 @@ import (
 
 func main() {
 	home, _ := os.UserHomeDir()
-	addr := flag.String("addr", "127.0.0.1:7777", "listen address")
+	addr := flag.String("addr", "127.0.0.1:7889", "listen address")
 	data := flag.String("data", filepath.Join(home, ".arranger"), "data directory")
 	parallel := flag.Int("parallel", 4, "max agent processes running at once")
 	level := flag.String("log", "info", "log level: debug, info, warn or error")
