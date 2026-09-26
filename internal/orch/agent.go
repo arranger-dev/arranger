@@ -152,6 +152,9 @@ func runAgent(j *job, prompt, dir string) (string, error) {
 				j.emit(e.Kind, e.Text, raw)
 			}
 		}
+		if j.overLimit {
+			break // the run ends at the limit; output still buffered from before the kill isn't counted
+		}
 		if err == io.EOF {
 			break
 		} else if err != nil {
