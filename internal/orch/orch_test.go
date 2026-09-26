@@ -144,6 +144,13 @@ esac`}
 	if _, err := git.Run(repo, "cat-file", "-e", "arranger/m:junk.txt"); err == nil {
 		t.Fatal("manager's own file edits should be discarded")
 	}
+	// each commit is one line saying what changed: the report's checkpoint, and the merge that brings it in
+	if out, _ := git.Run(repo, "log", "-1", "--format=%B", "arranger/a"); strings.TrimSpace(out) != "Write a" {
+		t.Fatalf("Alpha's checkpoint message: %q", out)
+	}
+	if out, _ := git.Run(repo, "log", "--merges", "--format=%s", "arranger/m"); !strings.Contains(out, "Write a\n") || strings.Contains(out, "Alpha") {
+		t.Fatalf("Lead's merge messages: %q", out)
+	}
 	var decisions int
 	o.Store.SQL().QueryRow(`SELECT count(*) FROM decisions WHERE agent_id='m'`).Scan(&decisions)
 	if decisions != 3 { // plan + two reviews
@@ -674,5 +681,20 @@ func TestEventsGroupedByRun(t *testing.T) {
 	}
 	if len(sessions) != 2 || !attempts[1] || !attempts[3] {
 		t.Fatalf("sessions %v, attempts %v", sessions, attempts)
+	}
+}
+
+// The agent's own "Commit:" line is the message; without one, the change or goal it worked on.
+func TestCheckpointMessage(t *testing.T) {
+	for _, c := range []struct{ summary, change, goal, want string }{
+		{"Did the thing.\n\nCommit: add retry with backoff to webhook sender.", "", "webhooks", "Add retry with backoff to webhook sender"},
+		{"**Commit:** `Rename LoginAttempts to Attempts`", "", "x", "Rename LoginAttempts to Attempts"},
+		{"I will commit this later.", "", "add rate limiting to /login", "Add rate limiting to /login"},
+		{"", "make the button say Subscribe", "checkout", "Make the button say Subscribe"},
+		{"Commit: first\nmore work\nCommit: second, final", "", "x", "Second, final"},
+	} {
+		if got := checkpointMessage(c.summary, c.change, c.goal); got != c.want {
+			t.Errorf("%q: got %q, want %q", c.summary, got, c.want)
+		}
 	}
 }

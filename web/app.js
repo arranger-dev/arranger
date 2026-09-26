@@ -565,8 +565,13 @@ $("#g-approve").onchange = async e => {
 
 async function select(id) {
   let data;
-  try { data = await api("GET", `/api/agents/${encodeURIComponent(id)}`); }
-  catch (e) { say(dirty ? "Save the arrangement first" : e.message, true); return; }
+  const load = () => api("GET", `/api/agents/${encodeURIComponent(id)}`);
+  try { data = await load(); }
+  catch (e) {
+    // an agent just added to the canvas isn't saved yet: save the canvas, then open it
+    if (!dirty || !agents.has(id)) { say(e.message, true); return; }
+    try { await save(); data = await load(); } catch (e2) { say(e2.message, true); return; }
+  }
   selected = id;
   $$(".card.sel").forEach(c => c.classList.remove("sel"));
   cardOf(id)?.classList.add("sel");
@@ -706,6 +711,7 @@ aform.onsubmit = async e => {
                  tokenSoft: Number(f.tokenSoft.value) || 0, tokenHard: Number(f.tokenHard.value) || 0, color: colorChoice,
                  approvePlan: f.approvePlan.checked };
   try {
+    if (dirty) await save(); // the canvas too: new agents, moves, renames
     await api("PUT", `/api/agents/${selected}`, body);
     const a = agents.get(selected);
     Object.assign(a, { name: body.name, runtime: body.runtime, color: body.color, approvePlan: body.approvePlan });
@@ -713,7 +719,7 @@ aform.onsubmit = async e => {
     $("#g-approve").checked = body.approvePlan;
     paintCard(a);
     $("#i-name").textContent = a.name;
-    status($("#a-msg"), dirty ? "Settings saved. The arrangement still has unsaved changes." : "Saved.");
+    status($("#a-msg"), "Saved.");
     refreshSummary();
   } catch (err) { status($("#a-msg"), err.message, true); }
 };
@@ -757,9 +763,12 @@ function canRevise(id) {
   const st = summary.agents[id];
   return !!st?.title && !["idle", "awaiting"].includes(st.status) && !BUSY.includes(st.status);
 }
-function openRevise() {
+// reviseGoal is the finished goal the change is about, or null for the agent's current goal.
+let reviseGoal = null;
+function openRevise(item) {
   const id = selected, team = kidsOf(id);
-  $("#revise-dialog h3").textContent = `Request changes from ${nameOf(id)}`;
+  reviseGoal = item?.id ?? null;
+  $("#revise-dialog h3").textContent = item ? `Request changes to "${item.title}"` : `Request changes from ${nameOf(id)}`;
   $("#r-hint").textContent = team.length
     ? `${nameOf(id)} passes each part to the ${team.length === 1 ? "agent" : "agents"} it concerns and re-runs only them. Everyone keeps their work; ${nameOf(id)} reviews and merges the changes and runs its checks again.`
     : `${nameOf(id)} keeps its work and changes only this, then its checks run again.`;
@@ -768,11 +777,11 @@ function openRevise() {
   $("#r-change").focus();
 }
 // a revise button, for the Goals list and the Logs tab
-function reviseButton(cls = "link") {
+function reviseButton(cls = "link", item) {
   const b = el("button", cls, "Request changes");
   b.type = "button";
   b.title = "Not quite right? Say what should change; the agent keeps its work and changes only that";
-  b.onclick = openRevise;
+  b.onclick = () => openRevise(item);
   return b;
 }
 $("#r-change").oninput = () => { revisingFor = selected; };
@@ -784,7 +793,7 @@ $("#r-go").onclick = async e => {
   status($("#r-msg"), "Starting…");
   try {
     if (dirty) await save();
-    await api("POST", `/api/agents/${id}/revise`, { change });
+    await api("POST", `/api/agents/${id}/revise`, { change, goal: reviseGoal || 0 });
     $("#r-change").value = "";
     revisingFor = null;
     status($("#r-msg"), "");
@@ -970,7 +979,7 @@ $("#pr-cancel").onclick = async e => {
 
 /* ---------- queue: goals a top-level agent runs one after another ---------- */
 
-let queue = null, editingItem = null, latestFinished = null;
+let queue = null, editingItem = null;
 const qURL = (path = "") => `/api/agents/${encodeURIComponent(selected)}/queue${path}`;
 const plainCount = (s, one) => { const n = lines(s).length; return `${n} ${one}${n === 1 ? "" : "s"}`; };
 const lines = s => (s || "").split("\n").map(l => l.trim()).filter(Boolean);
@@ -1001,14 +1010,11 @@ function renderQueue() {
   $("#q-state").textContent = running ? `working on goal ${finished.filter(i => i.status !== "skipped").length + 1} of ${queue.items.filter(i => i.status !== "skipped").length}`
     : st?.queuePaused ? `stopped at "${st.queuePaused}": it failed. Run goes on with the rest.`
     : left ? `${left} to run` : "";
-  $("#q-hint").hidden = waiting.length > 0;
-  $("#q-items").replaceChildren(...(waiting.length ? waiting.map(queueRow) : [el("li", "empty hint", "No goals yet. Add one, then press Run.")]));
-  const done = $("#q-done");
-  if (finished.length) done.dataset.n = finished.length; else delete done.dataset.n;
-  $("summary", done).textContent = `Finished (${finished.length})`;
-  latestFinished = finished.find(i => i.status !== "skipped");
-  if (latestFinished && canRevise(selected)) done.open = true; // its Request changes button should be in sight
-  $("ol", done).replaceChildren(...finished.map(doneRow));
+  $("#q-hint").hidden = queue.items.length > 0;
+  // one list in the order the goals run: finished ones where they were, then the one running, then the rest
+  const ran = [...finished].sort((a, b) => a.finished - b.finished || a.id - b.id);
+  const rows = [...ran.map(doneRow), ...waiting.map(queueRow)];
+  $("#q-items").replaceChildren(...(rows.length ? rows : [el("li", "empty hint", "No goals yet. Add one, then press Run.")]));
 }
 
 const GRIP = "M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01";
@@ -1043,12 +1049,13 @@ function itemMenu(it) {
 }
 
 function doneRow(it) {
-  const li = el("li", "qi");
+  const li = el("li", "qi fin");
   li.dataset.status = it.status;
   const t = el("span", "qt", it.title);
   t.title = it.title;
   const word = { done: "done", failed: "failed", blocked: "needs you", stopped: "stopped", skipped: "skipped" }[it.status] || it.status;
-  li.append(el("span", "dot"), t, el("span", "qm", word + (it.finished ? " · " + clock(it.finished) : "")));
+  const mark = it.status === "done" ? icon("ok", "ok") : ["failed", "blocked"].includes(it.status) ? icon("bad", "bad") : icon("bad");
+  li.append(mark, t, el("span", "qm", word + (it.finished ? " · " + clock(it.finished) : "")));
   const acts = el("span", "qa"); // on a line of their own, so a narrow panel never pushes them out of view
   if (it.session) {
     const b = el("button", "link", "View log");
@@ -1056,7 +1063,7 @@ function doneRow(it) {
     b.onclick = () => { logState.focus = it.session; showTab("logs"); };
     acts.append(b);
   }
-  if (it === latestFinished && canRevise(selected)) acts.append(reviseButton());
+  if (it.status !== "skipped" && canRevise(selected)) acts.append(reviseButton("link", it));
   li.append(acts);
   const again = el("button", "link", "Add again");
   again.type = "button";
@@ -1162,7 +1169,7 @@ $("#q-items").addEventListener("dragover", e => {
   if (!qDragged) return;
   e.preventDefault();
   const over = e.target.closest(".qi");
-  if (!over || over === qDragged || over.dataset.status === "running") return;
+  if (!over || over === qDragged || over.dataset.status !== "queued") return; // finished and running goals stay put
   const r = over.getBoundingClientRect();
   over.parentNode.insertBefore(qDragged, e.clientY < r.top + r.height / 2 ? over : over.nextSibling);
 });
@@ -1717,6 +1724,7 @@ async function loadPreview() {
   catch (e) { box.replaceChildren(el("p", "note bad", e.message)); return; }
   const lines = [];
   if (!mform.elements.target.value) mform.elements.target.value = p.target;
+  if (!mform.elements.message.dataset.edited) mform.elements.message.value = p.message; // every change it brings in
   const st = summary.agents[selected];
   if (st && st.status !== "done") lines.push(el("p", "note", `${nameOf(selected)} isn't done (${st.status}), so this work hasn't passed its checks.`));
   const something = (p.commits && p.files) || p.uncommitted > 0;
@@ -1742,11 +1750,13 @@ async function loadPreview() {
 $("#i-merge").onclick = async () => {
   $("#m-agent").textContent = nameOf(selected);
   mform.elements.target.value = "";
-  mform.elements.message.value = gform.elements.title.value;
+  mform.elements.message.value = "";
+  delete mform.elements.message.dataset.edited;
   status($("#m-msg"), "");
   mdlg.showModal();
   await loadPreview();
 };
+mform.elements.message.oninput = () => { mform.elements.message.dataset.edited = "1"; };
 mform.elements.target.oninput = () => { clearTimeout(previewTimer); previewTimer = setTimeout(loadPreview, 350); };
 mform.onsubmit = async e => {
   if (e.submitter?.value === "cancel") return;

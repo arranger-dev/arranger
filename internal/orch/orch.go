@@ -365,8 +365,9 @@ func runWorker(j *job, g store.Goal, dir, feedback string) string {
 		j.newRun(attempt)
 		j.emit("msg", fmt.Sprintf("attempt %d/%d with %s", attempt, maxAttempts, j.a.Runtime), "")
 
-		_, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change, j.fix), dir)
-		if sha, err := git.Commit(dir, fmt.Sprintf("arranger: %s attempt %d", j.a.Name, attempt)); err != nil {
+		summary, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change, j.fix), dir)
+		msg := checkpointMessage(summary, j.change, g.Title)
+		if sha, err := git.Commit(dir, msg); err != nil {
 			j.emit("error", err.Error(), "")
 		} else if sha != "" {
 			j.emit("msg", "checkpoint "+sha, "")

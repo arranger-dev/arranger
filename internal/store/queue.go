@@ -158,6 +158,11 @@ func (s *Store) SetQueue(agentID string, active *bool, onFail string) error {
 	return nil
 }
 
+// QueueItem returns one goal of the agent's list.
+func (s *Store) QueueItem(agentID string, id int64) (QueueItem, error) {
+	return scanQueueItem(s.db.QueryRow(`SELECT `+queueCols+` FROM queue WHERE agent_id=? AND id=?`, agentID, id))
+}
+
 // NextQueueItem is the agent's next waiting goal; sql.ErrNoRows when there's none.
 func (s *Store) NextQueueItem(agentID string) (QueueItem, error) {
 	return scanQueueItem(s.db.QueryRow(`SELECT `+queueCols+` FROM queue WHERE agent_id=? AND status='queued' ORDER BY pos, id LIMIT 1`, agentID))

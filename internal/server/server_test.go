@@ -333,8 +333,9 @@ func TestRunThenWorkWithTheChanges(t *testing.T) {
 		t.Fatalf("preview: %+v", m)
 	}
 	a.must(200, "POST", "/api/agents/k/merge", `{"target":"feature","strategy":"squash"}`)
-	if out, _ := git.Run(repo, "log", "-1", "--format=%s", "feature"); strings.TrimSpace(out) != "write files" {
-		t.Fatalf("squash commit message should default to the goal: %q", out)
+	// the message is the change itself; the hunk removed and brought back by hand isn't a change
+	if out, _ := git.Run(repo, "log", "-1", "--format=%B", "feature"); strings.TrimSpace(out) != "Write files" {
+		t.Fatalf("squash commit message should list the change: %q", out)
 	}
 }
 
@@ -684,5 +685,72 @@ func TestRunAllRunsGoals(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("goals never finished")
 		}
+	}
+}
+
+// Request changes on an older finished goal makes that goal the agent's goal again for the change.
+func TestReviseFinishedGoal(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"true"}`)
+	var first store.QueueItem
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/queue", `{"title":"first","checks":"true"}`)), &first)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"second","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/queue/start", "")
+	wait := func() {
+		for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+			if q, _ := a.st.Queue("k"); !q.Active && !a.o.IsRunning("k") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("never finished")
+			}
+		}
+	}
+	wait()
+	if g, _ := a.st.Goal("k"); g.Title != "second" {
+		t.Fatalf("goal after the list: %q", g.Title)
+	}
+	a.must(404, "POST", "/api/agents/k/revise", `{"change":"x","goal":99999}`)
+	a.must(202, "POST", "/api/agents/k/revise", `{"change":"make it nicer","goal":`+strconv.FormatInt(first.ID, 10)+`}`)
+	wait()
+	if g, _ := a.st.Goal("k"); g.Title != "first" || g.Status != "done" {
+		t.Fatalf("the change should run with the first goal: %+v", g)
+	}
+}
+
+// Merging an agent's work lists every change from all its goals, not just the last goal.
+func TestMergeMessageListsEveryChange(t *testing.T) {
+	a := newApp(t)
+	repo := newRepo(t)
+	os.WriteFile(filepath.Join(repo, "w.sh"), []byte("p=$(cat); date +%s%N > out.txt\ncase \"$p\" in *first*) echo 'Commit: add the first thing' ;; *) echo 'Commit: add the second thing' ;; esac\n"), 0o644)
+	git.Commit(repo, "add w.sh")
+	var p store.Project
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/projects", `{"name":"r","repo":"`+repo+`"}`)), &p)
+	a.must(204, "POST", "/api/projects/"+p.ID+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.must(204, "PUT", "/api/agents/k", `{"name":"Kid","runtime":"generic","args":"sh w.sh"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"first goal","checks":"true"}`)
+	a.must(200, "POST", "/api/agents/k/queue", `{"title":"second goal","checks":"true"}`)
+	a.must(202, "POST", "/api/agents/k/queue/start", "")
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if q, _ := a.st.Queue("k"); !q.Active && !a.o.IsRunning("k") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("never finished")
+		}
+	}
+	var m git.MergePreview
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/agents/k/merge?target=release", "")), &m)
+	want := "2 changes: Add the first thing; Add the second thing\n\n- Add the first thing\n- Add the second thing\n"
+	if m.Message != want {
+		t.Fatalf("preview message:\n%q\nwant\n%q", m.Message, want)
+	}
+	a.must(200, "POST", "/api/agents/k/merge", `{"target":"release","strategy":"merge"}`)
+	if out, _ := git.Run(repo, "log", "-1", "--format=%B", "release"); strings.TrimSpace(out) != strings.TrimSpace(want) {
+		t.Fatalf("merge commit message:\n%s", out)
 	}
 }

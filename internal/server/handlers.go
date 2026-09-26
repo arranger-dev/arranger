@@ -199,12 +199,33 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 }
 
 // revise re-runs an agent to make the change the user describes (see Orchestrator.Revise).
+// With a goal (a finished goal of its list), the change is about that goal: it becomes the
+// agent's goal again, and the change is made on top of the agent's current work.
 func (s *Server) revise(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Change string }
+	var req struct {
+		Change string
+		Goal   int64
+	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if err := s.o.Revise(r.PathValue("id"), req.Change); err != nil {
+	id := r.PathValue("id")
+	if req.Goal != 0 {
+		it, err := s.st.QueueItem(id, req.Goal)
+		if err != nil {
+			http.Error(w, "that goal isn't in this agent's list", http.StatusNotFound)
+			return
+		}
+		if s.o.IsRunning(id) {
+			http.Error(w, "stop it before asking for changes", http.StatusConflict)
+			return
+		}
+		if err := s.st.SaveGoal(id, store.Goal{Title: it.Title, Body: it.Body, Criteria: it.Criteria, Checks: it.Checks}); err != nil {
+			fail(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := s.o.Revise(id, req.Change); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}

@@ -297,7 +297,7 @@ svg.li.ok { color: var(--done); } svg.li.bad { color: var(--failed); } svg.li.mg
 .qhead h4 { margin: 0; font-size: 14px; }
 .qhead .hint { margin: 0; }
 #queue > .hint { margin-top: 4px; }
-#q-items, #q-done ol { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; counter-reset: q; }
+#q-items { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; counter-reset: q; }
 .qi { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
 #q-items .qi { counter-increment: q; }
 #q-items .qi::before { content: counter(q); width: 16px; color: var(--muted); font: 12px var(--mono); text-align: right; }
@@ -316,13 +316,12 @@ svg.li.ok { color: var(--done); } svg.li.bad { color: var(--failed); } svg.li.mg
 .qi .menu li button:hover { background: var(--sunk); }
 .qi .menu li button.danger { color: var(--failed); }
 .qi button.link { border: 0; background: none; padding: 0; color: var(--accent); font-size: 12px; white-space: nowrap; }
-#q-done .qi { flex-wrap: wrap; row-gap: 4px; }
-#q-done .qa { display: flex; flex-wrap: wrap; gap: 4px 14px; width: 100%; padding-left: 16px; }
+.qi.fin { flex-wrap: wrap; row-gap: 4px; }
+.qi.fin > svg.li { margin-top: 0; }
+.qi.fin .qa { display: flex; flex-wrap: wrap; gap: 4px 14px; width: 100%; padding-left: 46px; }
+.qi.fin[data-status=skipped] .qt, .qi.fin[data-status=stopped] .qt { color: var(--muted); }
 #q-form { margin-top: 10px; padding: 4px 12px 12px; background: var(--sunk); border: 1px solid var(--line); }
 .qfail { margin-top: 12px; font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
-#q-done { margin-top: 10px; font-size: 13px; }
-#q-done summary { cursor: pointer; color: var(--muted); }
-#q-done:not([data-n]) { display: none; }
 .card .badges .q { color: var(--accent); }
 label.check { display: flex; gap: 6px; align-items: center; font-weight: 400; color: var(--text); }
 label.check input { width: auto; margin: 0; padding: 0; accent-color: var(--accent); }
@@ -408,7 +407,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div class="card" draggable="true" data-role="tester" data-new><span class="name">Tester</span><span class="meta">tester</span></div>
   <div class="card" draggable="true" data-role="writer" data-new><span class="name">Technical Content Writer</span><span class="meta">writer</span></div>
   <div id="custom-types"></div>
-  <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New type</button>
+  <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New custom type</button>
   <ul class="help">
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Drag a type onto the canvas to add an agent</span></li>
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v7a4 4 0 0 0 4 4h12M15 10l5 5-5 5"/></svg><span>Drop it on an agent to put it under that agent</span></li>
@@ -474,7 +473,6 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
       </div>
       <div class="row" id="q-actions"><button type="button" id="q-add">+ Add goal</button></div>
       <p class="status" id="q-msg" role="status"></p>
-      <details id="q-done"><summary></summary><ol></ol></details>
     </section>
     <div id="g-single">
     <label>Goal</label><input name="title" placeholder="Add rate limiting to /login" required>
@@ -570,7 +568,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
       <label><input type="radio" name="strategy" value="squash"> Squash <small>one commit with all the changes</small></label>
       <label><input type="radio" name="strategy" value="ff" id="m-ff"> Fast-forward only <small>no merge commit</small></label>
     </div>
-    <label>Commit message</label><input name="message">
+    <label>Commit message</label><textarea name="message" rows="5" placeholder="Lists every change it brings in"></textarea>
     <div id="m-preview"></div>
     <div class="row"><button class="primary" value="merge" id="m-go">Merge</button><button value="cancel" formnovalidate>Close</button></div>
     <p class="status" id="m-msg" role="status"></p>

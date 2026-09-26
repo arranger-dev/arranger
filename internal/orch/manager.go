@@ -211,7 +211,9 @@ func (j *job) runTeam(g store.Goal, dir string, team []store.Agent, byID map[str
 				again = append(again, k)
 				continue
 			}
-			if err := git.MergeBranch(dir, git.BranchOf(id), "arranger: merge "+k.Name); err != nil {
+			kg, _ := st.Goal(id)
+			msg := mergeMessage(dir, git.BranchOf(id), kg.Title)
+			if err := git.MergeBranch(dir, git.BranchOf(id), msg); err != nil {
 				return j.fail("blocked", "needs you: merging "+k.Name+" failed: "+err.Error())
 			}
 			j.emit("verdict", "✓ accepted and merged "+k.Name, "")

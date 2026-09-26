@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, so the binary stays cgo-free
@@ -437,6 +438,16 @@ func (s *Store) Runs(agentID string, limit int) ([]RunUsage, error) {
 		rs = append(rs, r)
 	}
 	return rs, rows.Err()
+}
+
+// CheckpointGoal is the goal an agent was working on when it made the checkpoint commit sha, from
+// the run log ("" when the log doesn't say). It describes checkpoints from before commits did.
+func (s *Store) CheckpointGoal(sha string) string {
+	var title string
+	s.db.QueryRow(`SELECT st.text FROM events c JOIN events st ON st.agent_id = c.agent_id AND st.session = c.session AND st.kind = 'start'
+		WHERE c.kind = 'msg' AND c.text LIKE 'checkpoint %' AND c.session != 0 AND length(c.text) > 14 AND ? LIKE substr(c.text, 12) || '%'
+		ORDER BY c.id DESC LIMIT 1`, sha).Scan(&title)
+	return strings.TrimSpace(title)
 }
 
 // AddDecision records a manager's plan or review verdicts.

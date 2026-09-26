@@ -30,6 +30,8 @@ func workerPrompt(a store.Agent, g store.Goal, dir string, checks []string, feed
 	}
 	goalText(&b, g, checks)
 	b.WriteString("\nStay within the goal. Don't claim something works unless you verified it. Don't commit; the orchestrator does.\n")
+	b.WriteString("End your reply with one line describing what you changed, used as the commit message, in this form:\n" +
+		"Commit: <what changed, in the imperative, under 72 characters, e.g. Add retry with backoff to webhook sender>\n")
 	if g.Notes != "" {
 		b.WriteString("\nTHE USER REMOVED THESE CHANGES OF YOURS. Do not re-add them:\n" + g.Notes + "\n")
 	}
