@@ -53,72 +53,83 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 	// user approves, edits, sends back or cancels it before anything is saved or run
 	var team []store.Agent
 	changes := map[string]string{} // report id -> its part of the requested change
-	revising := j.change != "" && planned
-	planFeedback := feedback
-	for {
-		j.newRun(1)
-		var sgs []subgoal
-		var cs []revision
+	resumeFix := false             // continuing a fix round
+	if j.cont {
+		// continuing a blocked run: the same team, work and changes as its last plan; no new plan
 		var err error
-		if revising {
-			cs, err = j.proposeRevision(g, dir, kids, byID, goals, planFeedback)
-		} else {
-			sgs, err = j.proposePlan(g, dir, kids, byID, planFeedback)
+		if team, resumeFix, err = j.lastTeam(byID, changes); err != nil {
+			return j.fail("failed", err.Error())
 		}
-		if j.ctx.Err() != nil {
-			return j.fail("stopped", "stopped by user")
-		}
-		if errors.Is(err, errTokenLimit) {
-			return j.fail("failed", j.limitMsg())
-		}
-		if err != nil {
-			return j.fail("failed", "no valid plan: "+err.Error())
-		}
-		if !j.a.ApprovePlan {
+		j.emit("plan", "continuing with the same plan: "+names(team), "")
+	} else {
+		revising := j.change != "" && planned
+		planFeedback := feedback
+		for {
+			j.newRun(1)
+			var sgs []subgoal
+			var cs []revision
+			var err error
+			if revising {
+				cs, err = j.proposeRevision(g, dir, kids, byID, goals, planFeedback)
+			} else {
+				sgs, err = j.proposePlan(g, dir, kids, byID, planFeedback)
+			}
+			if j.ctx.Err() != nil {
+				return j.fail("stopped", "stopped by user")
+			}
+			if errors.Is(err, errTokenLimit) {
+				return j.fail("failed", j.limitMsg())
+			}
+			if err != nil {
+				return j.fail("failed", "no valid plan: "+err.Error())
+			}
+			if !j.a.ApprovePlan {
+				team = j.apply(sgs, cs, byID, goals, changes)
+				break
+			}
+			kind, proposed := "plan", any(planDraft{Subgoals: sgs})
+			if revising {
+				kind, proposed = "revision", revisionDraft{Changes: cs}
+			}
+			d, ended := j.await(kind, proposed)
+			if ended != "" {
+				return ended
+			}
+			if d.Action == "cancel" {
+				return j.fail("stopped", "you cancelled the plan")
+			}
+			if d.Action == "replan" {
+				b, _ := json.Marshal(proposed)
+				note := "The user sent back your plan without running it"
+				if d.Feedback != "" {
+					note += " and said: " + d.Feedback
+				}
+				j.emit("request", "you asked for a new plan"+strings.TrimPrefix(note, "The user sent back your plan without running it"), "")
+				planFeedback = strings.TrimSpace(feedback + "\n\n" + note + ".\nThe plan they sent back: " + string(b))
+				j.status("planning", nil)
+				continue
+			}
+			edited := false
+			if revising {
+				edited = !sameJSON(cs, d.Changes)
+				sgs, cs = nil, d.Changes
+			} else {
+				edited = !sameJSON(sgs, d.Subgoals)
+				sgs, cs = d.Subgoals, nil
+			}
+			if edited {
+				j.emit("request", "you approved the plan with edits", "")
+			} else {
+				j.emit("request", "you approved the plan", "")
+			}
 			team = j.apply(sgs, cs, byID, goals, changes)
 			break
 		}
-		kind, proposed := "plan", any(planDraft{Subgoals: sgs})
-		if revising {
-			kind, proposed = "revision", revisionDraft{Changes: cs}
-		}
-		d, ended := j.await(kind, proposed)
-		if ended != "" {
-			return ended
-		}
-		if d.Action == "cancel" {
-			return j.fail("stopped", "you cancelled the plan")
-		}
-		if d.Action == "replan" {
-			b, _ := json.Marshal(proposed)
-			note := "The user sent back your plan without running it"
-			if d.Feedback != "" {
-				note += " and said: " + d.Feedback
-			}
-			j.emit("request", "you asked for a new plan"+strings.TrimPrefix(note, "The user sent back your plan without running it"), "")
-			planFeedback = strings.TrimSpace(feedback + "\n\n" + note + ".\nThe plan they sent back: " + string(b))
-			j.status("planning", nil)
-			continue
-		}
-		edited := false
-		if revising {
-			edited = !sameJSON(cs, d.Changes)
-			sgs, cs = nil, d.Changes
-		} else {
-			edited = !sameJSON(sgs, d.Subgoals)
-			sgs, cs = d.Subgoals, nil
-		}
-		if edited {
-			j.emit("request", "you approved the plan with edits", "")
-		} else {
-			j.emit("request", "you approved the plan", "")
-		}
-		team = j.apply(sgs, cs, byID, goals, changes)
-		break
 	}
 
-	// 2. run children, review, merge; rejected children re-run with the review feedback
-	if s := j.runTeam(g, dir, team, byID, changes, false); s != "" {
+	// 2. run children, review, merge; rejected children re-run with the review feedback. A continued
+	// run keeps the work of the reports that already finished and runs only the others.
+	if s := j.runTeam(g, dir, team, byID, changes, resumeFix, j.cont); s != "" {
 		return s
 	}
 
@@ -157,7 +168,7 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 		}
 		fixes := map[string]string{}
 		team := j.applyRevision("fix", cs, byID, goals, fixes)
-		if s := j.runTeam(g, dir, team, byID, fixes, true); s != "" {
+		if s := j.runTeam(g, dir, team, byID, fixes, true, false); s != "" {
 			return s
 		}
 	}
@@ -167,12 +178,29 @@ func runManager(j *job, g store.Goal, dir string, kids []store.Agent, feedback s
 // rejected reports re-run with the review's feedback. changes holds each report's part of a
 // requested change (fix: of a fix for the manager's failing checks). It returns "" once all the
 // work is merged, else the manager's final status.
-func (j *job) runTeam(g store.Goal, dir string, team []store.Agent, byID map[string]store.Agent, changes map[string]string, fix bool) string {
+//
+// With keepDone, reports whose goal is already done aren't run again in the first round; they go
+// straight to review with the others.
+func (j *job) runTeam(g store.Goal, dir string, team []store.Agent, byID map[string]store.Agent, changes map[string]string, fix, keepDone bool) string {
 	st := j.o.Store
 	fb := map[string]string{}
 	for round := 1; len(team) > 0; round++ {
 		j.status("waiting", nil)
-		results := runChildren(j, team, fb, changes, fix)
+		run, results := team, map[string]string{}
+		if keepDone && round == 1 {
+			run = nil
+			for _, k := range team {
+				if kg, _ := st.Goal(k.ID); kg.Status == "done" {
+					results[k.ID] = "done"
+					j.emit("msg", k.Name+" already finished; keeping its work", "")
+				} else {
+					run = append(run, k)
+				}
+			}
+		}
+		for id, s := range runChildren(j, run, fb, changes, fix) {
+			results[id] = s
+		}
 		if j.ctx.Err() != nil {
 			return j.fail("stopped", "stopped by user")
 		}
@@ -272,6 +300,46 @@ func (j *job) proposeRevision(g store.Goal, dir string, kids []store.Agent, byID
 	var rev revisionDraft
 	err := j.decide(revisePrompt(j.a, g, kids, goals, j.change, feedback), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
 	return rev.Changes, err
+}
+
+// lastTeam rebuilds the team of the manager's last plan, routed change or fix round, with each
+// report's part of the change, for continuing a blocked run.
+func (j *job) lastTeam(byID map[string]store.Agent, changes map[string]string) (team []store.Agent, fix bool, err error) {
+	kind, raw := j.o.Store.LastDecision(j.a.ID, "plan", "revision", "fix")
+	if kind == "" {
+		return nil, false, errors.New("there's no plan to continue; press Run to plan")
+	}
+	var d struct {
+		Subgoals []subgoal
+		Changes  []revision
+	}
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		return nil, false, err
+	}
+	add := func(id string) {
+		if k, ok := byID[id]; ok {
+			team = append(team, k)
+		}
+	}
+	for _, s := range d.Subgoals {
+		add(s.Agent)
+	}
+	for _, c := range d.Changes {
+		add(c.Agent)
+		changes[c.Agent] = c.Change
+	}
+	if len(team) == 0 {
+		return nil, false, errors.New("the last plan's reports aren't on the team anymore; press Run to plan again")
+	}
+	return team, kind == "fix", nil
+}
+
+func names(as []store.Agent) string {
+	ns := make([]string, len(as))
+	for i, a := range as {
+		ns[i] = a.Name
+	}
+	return strings.Join(ns, ", ")
 }
 
 // proposeFix asks the manager which reports must fix what, now that their merged work fails its

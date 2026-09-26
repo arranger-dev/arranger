@@ -754,3 +754,45 @@ func TestMergeMessageListsEveryChange(t *testing.T) {
 		t.Fatalf("merge commit message:\n%s", out)
 	}
 }
+
+// Checks are suggested from the repo's own build files.
+func TestSuggestChecks(t *testing.T) {
+	repo := t.TempDir()
+	os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module x\n"), 0o644)
+	os.WriteFile(filepath.Join(repo, "package.json"), []byte(`{"scripts":{"build":"vite build","test":"echo \"Error: no test specified\" && exit 1","lint":"eslint ."}}`), 0o644)
+	os.WriteFile(filepath.Join(repo, "pnpm-lock.yaml"), nil, 0o644)
+	os.WriteFile(filepath.Join(repo, "Makefile"), []byte("build:\n\tgo build\ntest:\n\tgo test ./...\n"), 0o644)
+	var got []string
+	for _, c := range suggestChecks(repo) {
+		got = append(got, c.Cmd)
+	}
+	want := "go build ./...|go vet ./...|go test ./...|pnpm run build|pnpm run lint|make test"
+	if strings.Join(got, "|") != want {
+		t.Fatalf("got  %s\nwant %s", strings.Join(got, "|"), want)
+	}
+	if len(suggestChecks("")) != 0 {
+		t.Fatal("no repo, no suggestions")
+	}
+}
+
+// Starter teams are always there; the user's own templates can be saved and deleted.
+func TestTemplatesAPI(t *testing.T) {
+	a := newApp(t)
+	var s struct {
+		Tools     []tool
+		Templates []store.Template
+	}
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/setup?project="+a.pid, "")), &s)
+	if len(s.Templates) != 3 || s.Templates[0].Name != "Feature team" || s.Templates[0].Agents[1].Prompt == "" || len(s.Tools) == 0 {
+		t.Fatalf("setup: %+v", s)
+	}
+	a.must(400, "POST", "/api/templates", `{"name":"empty","agents":[]}`)
+	var saved store.Template
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/templates", `{"name":"Mine","agents":[{"key":"x","name":"X","role":"programmer"}]}`)), &saved)
+	json.Unmarshal([]byte(a.must(200, "GET", "/api/setup?project="+a.pid, "")), &s)
+	if len(s.Templates) != 4 || s.Templates[3].Name != "Mine" {
+		t.Fatalf("saved template missing: %+v", s.Templates)
+	}
+	a.must(400, "DELETE", "/api/templates/starter-docs", "")
+	a.must(204, "DELETE", "/api/templates/"+saved.ID, "")
+}

@@ -163,6 +163,7 @@ function addAgent(role, name, type, x, y, parent) {
   };
   agents.set(a.id, a);
   makeCard(a);
+  showEmptyCanvas();
   return a;
 }
 
@@ -283,7 +284,14 @@ canvas.addEventListener("pointerdown", e => {
   c.onpointerup = c.onpointercancel = () => {
     c.onpointermove = c.onpointerup = c.onpointercancel = null;
     c.classList.remove("dragging");
-    if (!moved) { select(a.id); return; }
+    if (!moved && e.shiftKey) {
+      const ids = new Set(picked);
+      if (selected && !ids.size) ids.add(selected);
+      ids.has(a.id) ? ids.delete(a.id) : ids.add(a.id);
+      setPicked(ids);
+      return;
+    }
+    if (!moved) { setPicked([]); select(a.id); return; }
     if (over) {
       over.classList.remove("drop");
       a.parent = over.dataset.id;
@@ -295,16 +303,57 @@ canvas.addEventListener("pointerdown", e => {
     drawLinks();
   };
 });
-// empty space: drag to pan, like draw.io
+// picked: the agents selected together, by dragging a box around them or shift-clicking
+const picked = new Set();
+function setPicked(ids) {
+  picked.clear();
+  ids.forEach(id => picked.add(id));
+  for (const a of agents.values()) a.el.classList.toggle("picked", picked.has(a.id));
+  if (picked.size > 1) say(`${picked.size} agents selected · Backspace removes them, Esc clears`);
+}
+
+// empty space: drag to select the boxes in a rectangle, like draw.io; hold Space (or use the
+// middle button) and drag to move around, or just scroll
+let spaceDown = false;
+document.addEventListener("keydown", e => {
+  if (e.code !== "Space" || e.repeat || e.target.closest?.("input, textarea, select, button, [contenteditable], dialog")) return;
+  spaceDown = true;
+  main.classList.add("can-pan");
+  e.preventDefault();
+});
+document.addEventListener("keyup", e => { if (e.code === "Space") { spaceDown = false; main.classList.remove("can-pan"); } });
 main.addEventListener("pointerdown", e => {
-  if (e.button !== 0 || e.target.closest(".card, button, #links .link")) return;
-  const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
+  if (e.button !== 0 && e.button !== 1 || e.target.closest("button, #links .link, #empty-canvas") || e.target.closest(".card") && !spaceDown) return;
   try { main.setPointerCapture(e.pointerId); } catch {}
-  main.classList.add("panning");
-  main.onpointermove = m => { main.scrollLeft = sx - m.clientX; main.scrollTop = sy - m.clientY; };
+  if (spaceDown || e.button === 1) {
+    e.preventDefault();
+    const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
+    main.classList.add("panning");
+    main.onpointermove = m => { main.scrollLeft = sx - m.clientX; main.scrollTop = sy - m.clientY; };
+    main.onpointerup = main.onpointercancel = () => {
+      main.onpointermove = main.onpointerup = main.onpointercancel = null;
+      main.classList.remove("panning");
+    };
+    return;
+  }
+  const r0 = canvas.getBoundingClientRect(), x0 = e.clientX - r0.left, y0 = e.clientY - r0.top;
+  const box = el("div");
+  box.id = "marquee";
+  let moved = false;
+  const before = e.shiftKey ? new Set(picked) : new Set(); // shift adds to what's selected
+  main.onpointermove = m => {
+    const r = canvas.getBoundingClientRect(), x1 = m.clientX - r.left, y1 = m.clientY - r.top;
+    if (!moved && Math.hypot(x1 - x0, y1 - y0) < 4) return;
+    if (!moved) { moved = true; canvas.append(box); }
+    const left = Math.min(x0, x1), top = Math.min(y0, y1), w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+    Object.assign(box.style, { left: left + "px", top: top + "px", width: w + "px", height: h + "px" });
+    const inside = [...agents.values()].filter(a => a.x < left + w && a.x + a.el.offsetWidth > left && a.y < top + h && a.y + a.el.offsetHeight > top).map(a => a.id);
+    setPicked([...before, ...inside]);
+  };
   main.onpointerup = main.onpointercancel = () => {
     main.onpointermove = main.onpointerup = main.onpointercancel = null;
-    main.classList.remove("panning");
+    box.remove();
+    if (!moved && !e.shiftKey) setPicked([]); // a click on empty space clears the selection
   };
 });
 // ask shows the styled confirm dialog and resolves true when the user presses the action button,
@@ -325,33 +374,62 @@ function ask(title, text, action, keep = "Cancel", danger = true) {
 }
 
 // removeAgent takes an agent off the canvas after the user confirms; its reports move up a level.
-async function removeAgent(id) {
-  const a = agents.get(id);
-  if (!a) return;
-  if (BUSY.includes(a.el.dataset.status)) { say(`${a.name} is running; stop it before removing it`, true); return; }
-  const n = kidsOf(id).length, st = summary.agents[id];
+async function removeAgent(id) { return removeAgents([id]); }
+
+// removeAgents takes agents off the canvas after one confirmation. Reports of a removed agent move
+// up to its nearest manager that stays.
+async function removeAgents(ids) {
+  const gone = ids.map(id => agents.get(id)).filter(Boolean);
+  if (!gone.length) return;
+  const busy = gone.filter(a => BUSY.includes(a.el.dataset.status));
+  if (busy.length) { say(`${names(busy.map(a => a.name))} ${busy.length === 1 ? "is" : "are"} running; stop ${busy.length === 1 ? "it" : "them"} before removing`, true); return; }
+  const out = new Set(gone.map(a => a.id));
+  const keeper = id => { let p = parentOf(id); while (p && out.has(p)) p = parentOf(p); return p || ""; };
+  const moving = [...agents.values()].filter(k => !out.has(k.id) && out.has(k.parent));
+  const withWork = gone.filter(a => summary.agents[a.id]?.adds || summary.agents[a.id]?.dels);
   const notes = [];
-  if (n) notes.push(`Its ${n === 1 ? "report moves" : `${n} reports move`} up to ${a.parent ? nameOf(a.parent) : "the top level"}.`);
-  if (st?.adds || st?.dels) notes.push(`Its work (+${st.adds} −${st.dels}) and its branch arranger/${id} are deleted when you save. Merge it first if you want to keep it.`);
-  if (!await ask(`Remove ${a.name}?`, notes.join(" "), "Remove")) return;
-  if (!agents.has(id)) return; // removed some other way while the dialog was open
-  kidsOf(id).forEach(k => k.parent = a.parent); // reports move up a level
-  if (selected === id) closeInspector();
-  a.el.remove();
-  agents.delete(id);
+  if (gone.length === 1) {
+    const a = gone[0], st = summary.agents[a.id];
+    if (moving.length) notes.push(`Its ${moving.length === 1 ? "report moves" : `${moving.length} reports move`} up to ${keeper(a.id) ? nameOf(keeper(a.id)) : "the top level"}.`);
+    if (withWork.length) notes.push(`Its work (+${st.adds} −${st.dels}) and its branch arranger/${a.id} are deleted when you save. Merge it first if you want to keep it.`);
+  } else {
+    notes.push(names(gone.map(a => a.name)) + ".");
+    if (moving.length) notes.push(`${moving.length === 1 ? "1 report moves" : `${moving.length} reports move`} up to the nearest manager that stays.`);
+    if (withWork.length === gone.length) notes.push("Their work and branches are deleted when you save. Merge first if you want to keep it.");
+    else if (withWork.length) notes.push(`The work of ${names(withWork.map(a => a.name))} and ${withWork.length === 1 ? "its branch are" : "their branches are"} deleted when you save. Merge first if you want to keep it.`);
+  }
+  if (!await ask(gone.length === 1 ? `Remove ${gone[0].name}?` : `Remove ${gone.length} agents?`, notes.join(" "), gone.length === 1 ? "Remove" : `Remove ${gone.length}`)) return;
+  for (const k of moving) if (agents.has(k.id)) k.parent = keeper(k.id);
+  for (const a of gone) {
+    if (!agents.has(a.id)) continue; // removed some other way while the dialog was open
+    if (selected === a.id) closeInspector();
+    a.el.remove();
+    agents.delete(a.id);
+  }
+  setPicked([]);
   markDirty();
   drawLinks();
+  showEmptyCanvas();
 }
 canvas.addEventListener("click", e => {
   if (e.target.classList.contains("x")) removeAgent(e.target.closest(".card").dataset.id);
 });
 // Backspace or Delete removes the selected agent, unless the user is typing or a dialog is open
 document.addEventListener("keydown", e => {
-  if (e.key !== "Backspace" && e.key !== "Delete" || !selected || e.metaKey || e.ctrlKey || e.altKey) return;
   const t = e.target;
   if (t.closest?.("input, textarea, select, [contenteditable], dialog") || document.querySelector("dialog[open]")) return;
+  if (e.key === "Escape" && picked.size) { setPicked([]); say(""); return; }
+  if (e.key.toLowerCase() === "a" && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) { // select every agent
+    if (!agents.size) return;
+    e.preventDefault();
+    setPicked([...agents.keys()]);
+    return;
+  }
+  if (e.key !== "Backspace" && e.key !== "Delete" || e.metaKey || e.ctrlKey || e.altKey) return;
+  const ids = picked.size ? [...picked] : selected ? [selected] : [];
+  if (!ids.length) return;
   e.preventDefault();
-  removeAgent(selected);
+  removeAgents(ids);
 });
 // askText is ask with a text field; it resolves to the text, or null when cancelled.
 async function askText(title, value, action) {
@@ -653,6 +731,7 @@ async function select(id) {
   d.dataset.path = data.dir;
   d.title = data.dir ? `Worktree on branch ${data.branch}. Click to copy the path.` : "";
   for (const k of ["title", "body", "criteria", "checks"]) gform.elements[k].value = g[k];
+  showSuggestions($("#g-suggest"), gform.elements.checks);
   for (const k of ["name", "runtime", "model", "args", "prompt"]) aform.elements[k].value = a[k];
   aform.elements.tokenSoft.value = a.tokenSoft || "";
   aform.elements.tokenHard.value = a.tokenHard || "";
@@ -699,6 +778,9 @@ $("#a-parent").onchange = e => {
 function showGoalState(g) {
   const mgr = parentOf(selected), team = kidsOf(selected);
   $("#i-run").title = !mgr ? "Run the goals in its list" : "Run from its goal";
+  const canContinue = team.length > 0 && ["blocked", "failed"].includes(g.status);
+  $("#i-continue").hidden = !canContinue;
+  $("#i-run").classList.toggle("primary", !canContinue); // one primary action at a time
   $("#g-hint").textContent = kidsOf(selected).length
     ? "Manager: Run plans subgoals for its team, runs them in parallel, reviews and merges their work, then runs these checks on the result."
     : mgr ? `${nameOf(mgr)} sets this goal when it plans; editing it here is fine, but the next plan replaces it.` : "";
@@ -729,8 +811,17 @@ function renderWorking(st) {
     ? "It's reading the repo and writing the plan. The plan shows up here for your approval; nothing runs until you approve it." : "";
 }
 
+// showStop enables Stop only while the selected agent is working or waiting on its plan.
+function showStop() {
+  const s = selected && summary.agents[selected]?.status;
+  const on = BUSY.includes(s) || s === "awaiting";
+  $("#i-stop").disabled = !on;
+  $("#i-stop").title = on ? "Stop it (and its team)" : "Nothing to stop: it isn't running";
+}
+
 function renderStats() {
   const st = selected && summary.agents[selected], box = $("#i-stats");
+  showStop();
   renderWorking(st);
   if (!st) { box.replaceChildren(); return; }
   const parts = [el("span", "", st.status)];
@@ -875,6 +966,20 @@ $("#r-go").onclick = async e => {
   btn.disabled = false;
 };
 
+// Continue: a blocked manager picks up where it stopped instead of planning and running everyone again.
+async function continueRun() {
+  const id = selected;
+  try {
+    if (dirty) await save();
+    await api("POST", `/api/agents/${encodeURIComponent(id)}/continue`);
+    setStatus(id, "starting");
+    runMsg(`${nameOf(id)} is continuing: finished reports keep their work, the others run again.`);
+    refreshSummary();
+    showTab("logs");
+  } catch (err) { runMsg(err.message, true); }
+}
+$("#i-continue").onclick = continueRun;
+
 $("#i-clone").onclick = async () => {
   if (!await ask(`Add a copy of ${nameOf(selected)}?`, "It gets the same settings and manager, but no goal." + (dirty ? " Unsaved changes on the canvas are saved too." : ""),
     "Add copy", "Cancel", false)) return;
@@ -914,9 +1019,48 @@ async function loadPlan(id) {
 }
 
 function planChanged(id) {
-  document.title = (plans.size ? "Plan ready · " : "") + baseTitle;
+  showTabState();
   refreshCards();
   if (id === selected) renderPlan();
+}
+
+// showTabState puts the project's state in the browser tab, for someone working in another tab:
+// "2 need you · …", "Working · …", "Done · …", with a matching dot on the icon.
+let tabState = { needs: 0, running: 0 };
+function showTabState(needs = tabState.needs, running = tabState.running) {
+  tabState = { needs, running };
+  const tops = [...agents.values()].filter(a => !parentOf(a.id)).map(a => summary.agents[a.id]?.status);
+  const [label, color] = needs ? [`${needs} ${needs === 1 ? "needs" : "need"} you`, "failed"]
+    : running ? ["Working", "running"]
+    : tops.length && tops.some(s => s === "done") && tops.every(s => ["done", "idle", undefined].includes(s)) ? ["Done", "done"]
+    : ["", ""];
+  document.title = (label ? label + " · " : "") + baseTitle;
+  drawFavicon(color);
+}
+
+// drawFavicon is the app icon with a colored dot for the state, or the plain icon.
+const favicon = $('link[rel="icon"]'), faviconImg = new Image();
+let faviconColor = null;
+faviconImg.src = "/arranger.png";
+function drawFavicon(color) {
+  if (color === faviconColor) return;
+  faviconColor = color;
+  if (!color) { favicon.href = "/arranger.png"; return; }
+  const draw = () => {
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d");
+    if (faviconImg.complete && faviconImg.naturalWidth) g.drawImage(faviconImg, 0, 0, 64, 64);
+    g.beginPath();
+    g.arc(46, 46, 16, 0, 2 * Math.PI);
+    g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--" + color).trim() || "#d64545";
+    g.fill();
+    g.lineWidth = 5;
+    g.strokeStyle = "#fff";
+    g.stroke();
+    favicon.href = c.toDataURL("image/png");
+  };
+  faviconImg.complete ? draw() : faviconImg.addEventListener("load", draw, { once: true });
 }
 
 // syncPlans fetches drafts for managers that wait on the user and drops the ones that don't anymore.
@@ -1165,6 +1309,7 @@ function openItemForm(it) {
   $("#qf-criteria").value = it?.criteria ?? "";
   $("#qf-checks").value = it?.checks ?? gform.elements.checks.value; // the agent's own checks are a good start
   $("#qf-save").textContent = it ? "Save goal" : "Add goal";
+  showSuggestions($("#qf-suggest"), $("#qf-checks"));
   $("#q-actions").hidden = true;
   $("#qf-title").focus();
 }
@@ -1250,6 +1395,166 @@ $("#q-items").addEventListener("dragend", e => {
   const ids = $$("#q-items .qi").filter(li => li.dataset.status === "queued").map(li => +li.dataset.id);
   queueCall("POST", "/order", { ids });
 });
+
+/* ---------- get started: agent tools, starter teams, checks for this repo ---------- */
+
+let setupData = null;
+async function loadSetup() {
+  try { setupData = await api("GET", `/api/setup?project=${encodeURIComponent(PID)}`); } catch { setupData = null; }
+  return setupData;
+}
+
+function copyButton(text) {
+  const b = el("button", "", "Copy");
+  b.type = "button";
+  b.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch { b.textContent = "Select it"; }
+    setTimeout(() => b.textContent = "Copy", 1500);
+  };
+  return b;
+}
+function cmdRow(label, text) {
+  const r = el("div", "su-cmd");
+  r.append(el("span", "", label), el("code", "", text), copyButton(text));
+  return r;
+}
+
+function renderSetup() {
+  const d = setupData;
+  if (!d) { $("#su-tools").replaceChildren(el("p", "note bad", "Couldn't check this machine.")); return; }
+  $("#su-tools").replaceChildren(...d.tools.map(t => {
+    const row = el("div", "su-tool"), state = el("span", t.installed ? "ok" : "no", t.installed ? `Installed${t.version ? " · " + t.version : ""}` : "Not installed");
+    const cmds = el("div", "cmds");
+    if (!t.installed) cmds.append(cmdRow("install", t.install));
+    cmds.append(cmdRow("sign in", t.login));
+    const docs = el("a", "", "Docs");
+    docs.href = t.docs; docs.target = "_blank"; docs.rel = "noopener";
+    const head = el("span");
+    head.append(state, " · ", docs);
+    row.append(el("span", "name", t.runtime), head, cmds);
+    return row;
+  }));
+  $("#su-teams").replaceChildren(...d.templates.map(t => {
+    const card = el("div", "su-team"), add = el("button", "primary", "Add to canvas"), row = el("div", "row");
+    add.type = "button";
+    add.title = "Add this team next to the agents already on the canvas";
+    add.onclick = () => addTemplate(t);
+    const only = el("button", "", "Replace canvas");
+    only.type = "button";
+    only.title = "Remove every agent on the canvas and use only this team";
+    only.onclick = () => replaceWithTemplate(t);
+    row.append(add, only);
+    if (!t.builtIn) {
+      const del = el("button", "danger", "Delete");
+      del.type = "button";
+      del.onclick = async () => {
+        if (!await ask(`Delete the "${t.name}" template?`, "Teams already on a canvas stay.", "Delete")) return;
+        try { await api("DELETE", `/api/templates/${encodeURIComponent(t.id)}`); await loadSetup(); renderSetup(); } catch (err) { status($("#su-msg"), err.message, true); }
+      };
+      row.append(del);
+    }
+    card.append(el("b", "", t.name), el("p", "hint", t.about || `${t.agents.length} agents`), el("span", "hint", t.agents.map(a => a.name).join(", ")), row);
+    return card;
+  }));
+  $("#su-checks").replaceChildren(...(d.checks.length ? d.checks.map(c => { const s = el("span", "", c.cmd); s.append(el("i", "", c.why)); return s; })
+    : [el("p", "hint", window.PROJECT?.repo ? "No build files found to suggest checks from. Write your own: any shell command that exits 0 when the goal is met." : "Set this project's git repository (⚙ in the header) to get suggestions.")]));
+}
+
+async function openSetup() {
+  status($("#su-msg"), "");
+  $("#su-tools").replaceChildren(el("p", "hint", "Checking this machine…"));
+  $("#setup-dialog").showModal();
+  await loadSetup();
+  renderSetup();
+}
+$("#get-started").onclick = openSetup;
+$("#empty-start").onclick = openSetup;
+
+// addTemplate drops a team onto the canvas, to the right of what's there, and saves it.
+async function addTemplate(t) {
+  let x0 = PAD, y0 = PAD;
+  for (const a of agents.values()) x0 = Math.max(x0, a.x + (a.el?.offsetWidth || 210) + GAP_X / 2);
+  const ids = {};
+  for (const ta of t.agents) {
+    const a = addAgent(ta.role, ta.name, TYPES.get(ta.role) || null, x0 + ta.x, y0 + ta.y, ta.parent ? ids[ta.parent] : "");
+    ids[ta.key] = a.id;
+    Object.assign(a, { runtime: ta.runtime || a.runtime, color: ta.color || "" });
+    a.defaults = { ...(a.defaults || {}), ...(ta.model ? { model: ta.model } : {}), ...(ta.args ? { args: ta.args } : {}), ...(ta.prompt ? { prompt: ta.prompt } : {}) };
+    paintCard(a);
+  }
+  drawLinks();
+  showEmptyCanvas();
+  try {
+    await save();
+    $("#setup-dialog").close();
+    say(`Added the ${t.name} team`);
+    main.scrollTo({ left: Math.max(0, x0 - PAD), top: 0, behavior: "smooth" });
+  } catch (err) { status($("#su-msg"), err.message, true); }
+}
+
+// replaceWithTemplate clears the canvas and puts only this team on it, after the user confirms.
+async function replaceWithTemplate(t) {
+  const all = [...agents.values()];
+  if (!all.length) return addTemplate(t);
+  const busy = all.filter(a => BUSY.includes(a.el.dataset.status));
+  if (busy.length) { status($("#su-msg"), `${names(busy.map(a => a.name))} ${busy.length === 1 ? "is" : "are"} running; stop ${busy.length === 1 ? "it" : "them"} first.`, true); return; }
+  const withWork = all.filter(a => summary.agents[a.id]?.adds || summary.agents[a.id]?.dels);
+  if (!await ask(`Replace the canvas with ${t.name}?`,
+    `This removes the ${all.length === 1 ? "agent" : `${all.length} agents`} on it now (${names(all.map(a => a.name))}).` +
+    (withWork.length ? ` Their work and branches are deleted when it saves; merge first if you want to keep ${withWork.length === 1 ? "it" : "them"}.` : ""),
+    "Replace canvas")) return;
+  closeInspector();
+  setPicked([]);
+  for (const a of all) { a.el.remove(); agents.delete(a.id); }
+  await addTemplate(t); // places it at the top left and saves
+}
+
+$("#su-save").onclick = async () => {
+  const name = $("#su-name").value.trim();
+  if (!name) { status($("#su-msg"), "Give the template a name.", true); $("#su-name").focus(); return; }
+  if (!agents.size) { status($("#su-msg"), "The canvas is empty; add agents first.", true); return; }
+  try {
+    if (dirty) await save();
+    const list = [...agents.values()];
+    const minX = Math.min(...list.map(a => a.x)), minY = Math.min(...list.map(a => a.y));
+    const full = await Promise.all(list.map(a => api("GET", `/api/agents/${encodeURIComponent(a.id)}`).then(r => r.agent)));
+    // parents first, so a template always builds top-down
+    const depth = a => { let n = 0; for (let p = parentOf(a.id); p; p = parentOf(p)) n++; return n; };
+    const rows = list.map((a, i) => ({ a, f: full[i] })).sort((x, y) => depth(x.a) - depth(y.a));
+    await api("POST", "/api/templates", { name, agents: rows.map(({ a, f }) => ({
+      key: a.id, name: a.name, role: a.role, parent: parentOf(a.id) || "", runtime: f.runtime, model: f.model, args: f.args,
+      prompt: f.prompt, color: f.color, x: a.x - minX, y: a.y - minY })) });
+    $("#su-name").value = "";
+    status($("#su-msg"), `Saved "${name}".`);
+    await loadSetup();
+    renderSetup();
+  } catch (err) { status($("#su-msg"), err.message, true); }
+};
+
+// showEmptyCanvas invites a new user to start from a team when the canvas is empty.
+function showEmptyCanvas() { $("#empty-canvas").hidden = agents.size > 0; }
+
+// suggested checks under each Checks box: one click adds the line
+function showSuggestions(box, textarea) {
+  const cs = setupData?.checks || [];
+  if (!cs.length) { box.replaceChildren(); return; }
+  const have = new Set(lines(textarea.value));
+  const todo = cs.filter(c => !have.has(c.cmd));
+  if (!todo.length) { box.replaceChildren(); return; }
+  box.replaceChildren("Suggested:", ...todo.map(c => {
+    const b = el("button", "", c.cmd);
+    b.type = "button";
+    b.title = `Add this check: ${c.why}`;
+    b.onclick = () => {
+      textarea.value = (textarea.value.trim() ? textarea.value.trimEnd() + "\n" : "") + c.cmd;
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      showSuggestions(box, textarea);
+    };
+    return b;
+  }));
+}
+$("#qf-checks").addEventListener("input", () => showSuggestions($("#qf-suggest"), $("#qf-checks")));
+gform.elements.checks.addEventListener("input", () => showSuggestions($("#g-suggest"), gform.elements.checks));
 
 /* ---------- logs: one section per run, outcome and reason first ---------- */
 
@@ -1562,7 +1867,14 @@ function section(g, latest, all, first) {
     if (act) body.append(el("p", "lact", act));
     const cl = checklist(g);
     if (cl) body.append(cl);
-    if (latest && ["done", "failed", "blocked"].includes(o.state) && canRevise(logState.agent)) {
+    const manager = kidsOf(logState.agent).length > 0;
+    if (latest && manager && ["blocked", "failed"].includes(o.state)) {
+      const p = el("p", "lnext"), b = el("button", "primary", "Continue");
+      b.type = "button";
+      b.onclick = continueRun;
+      p.append("Fixed what stopped it? ", b, " picks up from here: finished reports keep their work, the rest run again.");
+      body.append(p);
+    } else if (latest && ["done", "failed", "blocked"].includes(o.state) && canRevise(logState.agent)) {
       const p = el("p", "lnext");
       p.append("Not quite right? ", reviseButton("primary"));
       body.append(p);
@@ -1894,6 +2206,7 @@ async function refreshSummary() {
   $("#running").hidden = running === 0;
   $("#tokens").textContent = fmtTok(all.reduce((n, [, s]) => n + (s.allTokens || 0), 0));
   $("#n-needs").textContent = needs.length;
+  showTabState(needs.length, running);
   $("#needs").dataset.n = needs.length;
   $("#needs").dataset.kind = needs.every(([, s]) => s.status === "awaiting") ? "plan" : "fail"; // amber for plans, red for failures
   if (!needs.length) $("#needs").open = false;
@@ -1918,6 +2231,7 @@ function setStatus(id, s) {
   st.status = s;
   if (BUSY.includes(s) && !st.since) st.since = Date.now();
   refreshCards();
+  if (id === selected) showStop();
 }
 
 let summaryTimer = 0;
@@ -1981,5 +2295,7 @@ renderTypes();
 if ([...agents.values()].some(a => a.x == null || a.y == null)) layout(false);
 agents.forEach(makeCard);
 refreshCards();
+showEmptyCanvas();
+loadSetup(); // suggested checks for the goal forms
 refreshSummary();
 document.fonts?.ready.then(drawLinks); // box heights settle once fonts load

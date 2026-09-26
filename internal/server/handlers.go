@@ -262,6 +262,15 @@ func (s *Server) decidePlan(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// continueRun picks a blocked manager's run back up (see Orchestrator.Continue).
+func (s *Server) continueRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.o.Continue(r.PathValue("id")); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
 	s.o.Stop(r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)

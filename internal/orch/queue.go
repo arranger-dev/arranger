@@ -53,7 +53,7 @@ func (o *Orchestrator) runNext(agentID string) error {
 		if err := o.Store.SaveGoal(agentID, store.Goal{Title: it.Title, Body: it.Body, Criteria: it.Criteria, Checks: it.Checks}); err != nil {
 			return err
 		}
-		session, err := o.start(agentID, "")
+		session, err := o.start(agentID, "", false)
 		if err == nil {
 			o.Store.StartQueueItem(it.ID, session)
 			o.queueChanged(agentID)

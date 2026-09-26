@@ -212,7 +212,34 @@ func checkGoal(a store.Agent, g store.Goal) error {
 }
 
 // Start validates a run and starts it in the background. A manager runs its whole subtree.
-func (o *Orchestrator) Start(agentID string) error { _, err := o.start(agentID, ""); return err }
+func (o *Orchestrator) Start(agentID string) error { _, err := o.start(agentID, "", false); return err }
+
+// Continue picks a blocked manager's run back up where it stopped: the reports that finished keep
+// their work, the others run again, and then everything is reviewed, merged and checked together,
+// with no new plan. The goal it was on, if from its list, is marked running again.
+func (o *Orchestrator) Continue(agentID string) error {
+	kids, err := o.Store.Children(agentID)
+	if err != nil {
+		return err
+	}
+	if len(kids) == 0 {
+		return errors.New("only a manager can continue; run this agent instead")
+	}
+	g, _ := o.Store.Goal(agentID)
+	if g.Status != "blocked" && g.Status != "failed" {
+		return fmt.Errorf("there's nothing to continue: it's %s", g.Status)
+	}
+	last, lastErr := o.Store.LastQueueItem(agentID)
+	session, err := o.start(agentID, "", true)
+	if err != nil {
+		return err
+	}
+	if lastErr == nil && last.Title == g.Title && (last.Status == "blocked" || last.Status == "failed") {
+		o.Store.StartQueueItem(last.ID, session)
+		o.queueChanged(agentID)
+	}
+	return nil
+}
 
 // Revise re-runs an agent that already worked, to make the change the user describes. A worker
 // keeps its work and makes the change; a manager passes each part of it to the reports it
@@ -221,12 +248,12 @@ func (o *Orchestrator) Revise(agentID, change string) error {
 	if change = strings.TrimSpace(change); change == "" {
 		return errors.New("describe what should change")
 	}
-	_, err := o.start(agentID, change)
+	_, err := o.start(agentID, change, false)
 	return err
 }
 
-// start returns the new run's log session.
-func (o *Orchestrator) start(agentID, change string) (int64, error) {
+// start returns the new run's log session. cont continues a blocked run (see Continue).
+func (o *Orchestrator) start(agentID, change string, cont bool) (int64, error) {
 	a, pid, err := o.Store.Agent(agentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("agent %s not found; save the arrangement first", agentID)
@@ -252,7 +279,7 @@ func (o *Orchestrator) start(agentID, change string) (int64, error) {
 		cancel()
 		return 0, fmt.Errorf("%s is already running", a.Name)
 	}
-	j := &job{o: o, ctx: ctx, p: p, a: a, change: change, session: time.Now().UnixMilli()}
+	j := &job{o: o, ctx: ctx, p: p, a: a, change: change, cont: cont, session: time.Now().UnixMilli()}
 	if change != "" {
 		j.emit("request", "you asked for changes: "+change, "")
 	}
@@ -279,6 +306,7 @@ type job struct {
 	// it its manager passed down). "" for a plain run from the goal.
 	change string
 	fix    bool // change is a fix the manager asks for because the team's merged work fails its checks
+	cont   bool // continuing a blocked run: same plan, only unfinished reports run
 
 	allow []string // shell commands the agent may run without asking: a worker's own checks
 

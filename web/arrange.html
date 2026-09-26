@@ -35,6 +35,8 @@ button { background: var(--panel); border: 1px solid var(--line); padding: 5px 1
 button:hover { border-color: var(--muted); }
 button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 button.danger { color: var(--failed); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:disabled:hover { border-color: var(--line); }
 button.primary.danger { background: var(--failed); border-color: var(--failed); color: #fff; }
 input, select, textarea { background: var(--panel); border: 1px solid var(--line); padding: 6px 8px; width: 100%; }
 textarea { resize: vertical; min-height: 60px; }
@@ -139,6 +141,9 @@ main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
   border-left: 3px solid var(--c, var(--accent)); padding: 10px 14px; cursor: grab; user-select: none; width: 210px; }
 .card:hover { border-color: var(--muted); border-left-color: var(--c); }
 .card.sel { outline: 2px solid var(--accent); outline-offset: -1px; }
+.card.picked { outline: 2px solid var(--accent); outline-offset: 2px; background: color-mix(in srgb, var(--accent) 8%, var(--card, var(--panel))); }
+#marquee { position: absolute; z-index: 4; pointer-events: none; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+main.can-pan, main.can-pan .card { cursor: grab; }
 .card.drop { outline: 2px dashed var(--accent); background: var(--drop); }
 .card .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card .x { color: var(--muted); cursor: pointer; }
@@ -236,6 +241,34 @@ body.resizing { cursor: col-resize; user-select: none; }
 .lout { margin: 10px 0 0; font-size: 14px; font-weight: 600; color: var(--s); line-height: 1.4; }
 .lnext { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
 #revise-dialog { width: min(520px, 94vw); }
+#get-started { width: 100%; margin-top: 8px; }
+#empty-canvas { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); z-index: 2; display: grid; justify-items: center; gap: 8px;
+  padding: 24px 28px; background: var(--panel); border: 1px dashed var(--line); text-align: center; color: var(--muted); }
+#empty-canvas[hidden] { display: none; }
+#empty-canvas b { color: var(--text); font-size: 15px; }
+#setup-dialog { width: min(720px, 94vw); }
+#setup-dialog h4 { margin: 18px 0 6px; font-size: 14px; }
+.su-tool { display: grid; grid-template-columns: 90px 1fr; gap: 2px 12px; padding: 8px 0; border-top: 1px solid var(--sunk); font-size: 13px; }
+.su-tool .name { font-weight: 600; }
+.su-tool .ok { color: var(--done); } .su-tool .no { color: var(--muted); }
+.su-tool .cmds { grid-column: 2; display: grid; gap: 4px; }
+.su-cmd { display: flex; align-items: center; gap: 8px; }
+.su-cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; background: var(--sunk); padding: 4px 8px; font: 12px var(--mono); }
+.su-cmd span { width: 44px; color: var(--muted); font-size: 12px; }
+.su-cmd button, .su-team button { padding: 3px 10px; font-size: 12px; }
+#su-msg:empty { display: none; }
+#su-teams { margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.su-team { border: 1px solid var(--line); padding: 10px 12px; display: grid; gap: 4px; align-content: start; font-size: 13px; }
+.su-team b { font-size: 14px; }
+.su-team .hint { margin: 0; }
+.su-team .row { margin-top: 6px; flex-wrap: wrap; gap: 6px; }
+.su-team .row button { white-space: nowrap; }
+#su-checks { display: flex; flex-wrap: wrap; gap: 6px; }
+.suggest { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.suggest:empty { display: none; }
+.suggest button, #su-checks span { font: 12px var(--mono); padding: 2px 8px; }
+#su-checks span { border: 1px solid var(--line); background: var(--sunk); }
+#su-checks i { font: 12px var(--sans); color: var(--muted); font-style: normal; margin-left: 6px; }
 .lout code, .lchk code { font: 12px var(--mono); }
 .lact { margin: 4px 0 0; font-size: 13px; color: var(--muted); line-height: 1.45; }
 .lchk { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; }
@@ -302,6 +335,7 @@ svg.li.ok { color: var(--done); } svg.li.bad { color: var(--failed); } svg.li.mg
 .help svg { width: 14px; height: 14px; flex: none; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 #queue { margin-top: 16px; }
 #q-actions { margin-top: 8px; }
+#q-actions[hidden] { display: none; }
 #run-dialog { width: min(560px, 94vw); }
 #run-goals { margin: 12px 0 0; padding-left: 22px; display: grid; gap: 10px; max-height: 50vh; overflow: auto; }
 #run-goals li b { font-weight: 600; }
@@ -422,6 +456,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   <div class="card" draggable="true" data-role="writer" data-new><span class="name">Technical Content Writer</span><span class="meta">writer</span></div>
   <div id="custom-types"></div>
   <button id="new-type" title="A reusable agent with its own color, tool and instructions">+ New custom type</button>
+  <button id="get-started" title="Start from a ready team, check your agent tools, and find checks for your repo">Teams &amp; Tools</button>
   <ul class="help">
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Drag a type onto the canvas to add an agent</span></li>
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v7a4 4 0 0 0 4 4h12M15 10l5 5-5 5"/></svg><span>Drop it on an agent to put it under that agent</span></li>
@@ -429,7 +464,8 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v8M12 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM12 16a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"/></svg><span>Drag a box's dots to another agent to connect them</span></li>
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg><span>Hover a connection and click its × to remove it</span></li>
     <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg><span>Double-click a box to rename it</span></li>
-    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM18 9l-6 6M12 9l6 6"/></svg><span>Select a box and press Backspace to remove it</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM18 9l-6 6M12 9l6 6"/></svg><span>Drag on empty space (or ⌘/Ctrl+A) to select boxes; Backspace removes them</span></li>
+    <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg><span>Hold Space and drag, or scroll, to move around</span></li>
   </ul>
   {{if not .Project.Repo}}<p class="hint bad">This project has no git repository yet. Set one in Settings to run agents.</p>{{end}}
   <span class="grow"></span>
@@ -441,7 +477,9 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   </p>{{end}}
 </aside>
 
-<main><button id="tidy" title="Lay the boxes out as a tree again">Tidy up</button><div id="canvas"><svg id="links"></svg></div></main>
+<main><button id="tidy" title="Lay the boxes out as a tree again">Tidy up</button>
+  <div id="empty-canvas" hidden><b>No agents yet.</b><span>Drag an agent type from the left, or</span><button type="button" class="primary" id="empty-start">Start from a ready team</button></div>
+  <div id="canvas"><svg id="links"></svg></div></main>
 
 <aside id="inspector" hidden>
   <div id="resize" title="Drag to resize"></div>
@@ -451,6 +489,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <span id="i-dir"></span>
     <button id="i-clone" title="Add a copy of this agent (same settings and manager, no goal)">Clone</button>
     <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
+    <button id="i-continue" class="primary" hidden title="Pick the run up where it stopped: finished reports keep their work, the others run again, then everything is reviewed and merged">Continue</button>
     <button id="i-run" class="primary">Run</button>
     <button id="i-stop" class="danger">Stop</button>
     <button id="i-close" title="Close">×</button>
@@ -485,6 +524,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
         <label for="qf-body">Details</label><textarea id="qf-body" rows="2" placeholder="Context the agent needs"></textarea>
         <label for="qf-criteria">Acceptance criteria</label><textarea id="qf-criteria" rows="2" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
         <label for="qf-checks">Checks: one shell command per line, all must exit 0</label><textarea id="qf-checks" class="mono" rows="2" placeholder="go test ./..."></textarea>
+        <div class="suggest" id="qf-suggest"></div>
         <div class="row"><button type="button" class="primary" id="qf-save">Add goal</button><button type="button" id="qf-cancel">Cancel</button></div>
       </div>
       <div class="row" id="q-actions"><button type="button" id="q-add">+ Add goal</button></div>
@@ -495,6 +535,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <label>Details</label><textarea name="body" placeholder="Context the agent needs"></textarea>
     <label>Acceptance criteria</label><textarea name="criteria" placeholder="- 5 failed attempts per minute returns 429&#10;- no new dependencies"></textarea>
     <label>Checks: one shell command per line, all must exit 0</label><textarea name="checks" class="mono" placeholder="go test ./..."></textarea>
+    <div class="suggest" id="g-suggest"></div>
     <div id="g-feedback" hidden><label>Last failure</label><div class="feedback mono"></div></div>
     <div class="row"><button class="primary">Save goal</button><span id="g-state" class="hint" style="margin:0"></span></div>
     <p class="status" id="g-msg" role="status"></p>
@@ -597,6 +638,22 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <p class="hint" id="c-text"></p>
     <input id="c-input" hidden maxlength="60" aria-label="Name">
     <div class="row"><button class="primary danger" value="ok" id="c-ok"></button><button value="cancel" id="c-cancel"></button></div>
+  </form>
+</dialog>
+
+<dialog id="setup-dialog">
+  <form method="dialog">
+    <div class="row" style="margin:0"><h3 style="flex:1">Teams &amp; Tools</h3><button value="close">Close</button></div>
+    <h4>1. Start from a ready team</h4>
+    <div class="row" style="margin-top:0"><input id="su-name" placeholder="Name, e.g. My feature team"><button type="button" id="su-save">Save this canvas as a template</button></div>
+    <p class="status" id="su-msg" role="status"></p>
+    <div id="su-teams"></div>
+    <h4>2. Agent tools on this machine</h4>
+    <p class="hint" style="margin-top:0">Arranger drives these command-line tools. Install at least one and sign in to it once in a terminal.</p>
+    <div id="su-tools"></div>
+    <h4>3. Checks for this repo</h4>
+    <p class="hint" style="margin-top:0">A goal is done only when its checks pass. These fit this repo; they're offered under every Checks box, one click to add.</p>
+    <div id="su-checks"></div>
   </form>
 </dialog>
 

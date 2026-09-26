@@ -47,7 +47,7 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
 
 2. **Point it at a repo.** Click **Settings** in the header and enter the path to a git repository. Leave the base branch blank to use the current branch. The repo needs at least one commit.
 
-3. **Arrange the team.** Drag agent types from the left onto the canvas. Drop one agent onto another to put it under that agent. Click a box to pick its tool (runtime), model, color and instructions in the **Settings** tab. Click **Save**.
+3. **Arrange the team.** Press **Teams & Tools** in the sidebar to drop in a ready team (Feature team, Bug fix, Docs) and check which agent tools are installed, or drag agent types from the left onto the canvas. Drop one agent onto another to put it under that agent. Click a box to pick its tool (runtime), model, color and instructions in the **Settings** tab. Click **Save**.
 
 4. **Add goals.** Select the top agent and press **+ Add goal** in its **Goal** tab. Each goal has:
    - **Goal:** the outcome, e.g. "Add rate limiting to /login".
@@ -58,7 +58,9 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
 
    Want to check the plan first? Tick **Let me approve the plan before the team runs** under the manager's goals. The manager then stops after planning and shows you each report's goal and checks: edit them, skip or add reports, send the plan back with feedback, or approve it to start the team.
 
-6. **Iterate.** Not quite right? Select the agent and write what should change in **Request changes**. Ask the top manager and it passes each part to the agents it concerns and re-runs only them; everyone keeps their work, and the changes are reviewed, merged and checked like any run. (To redo a finished goal from scratch, use **Add again** in its Finished list and press **Run**.)
+6. **Iterate.** Not quite right? Select the agent and write what should change in **Request changes**. Ask the top manager and it passes each part to the agents it concerns and re-runs only them; everyone keeps their work, and the changes are reviewed, merged and checked like any run. (To redo a finished goal from scratch, use **Add again** on it and press **Run**.)
+
+   Blocked because one report failed? Fix what it needed, then press **Continue** on the manager: the reports that finished keep their work, only the others run again, and then everything is reviewed, merged and checked together, with no new plan.
 
 7. **Review and merge.** Open the **Diff** tab to see every change, remove or promote single hunks, or revert a checkpoint. When you're happy, press **Merge…** to merge the agent's branch into `main` (or any branch, created if needed) as a merge commit, a squash, or a fast-forward.
 

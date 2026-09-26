@@ -698,3 +698,57 @@ func TestCheckpointMessage(t *testing.T) {
 		}
 	}
 }
+
+// A blocked manager continues where it stopped: the report that finished keeps its work and isn't
+// run again, the one that failed runs again, and then both are reviewed, merged and checked.
+func TestContinueBlockedRun(t *testing.T) {
+	o := setup(t)
+	fixed := filepath.Join(t.TempDir(), "fixed")
+	plain := func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} }
+	agents.Runtimes["contmgr"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+		return []string{"-c", `p=$(cat); case "$p" in *"YOUR TEAM:"*) echo '{"subgoals":[{"agent":"a","title":"write a","checks":["test -f a.txt"]},{"agent":"b","title":"write b","checks":["test -f b.txt"]}]}' ;; *) echo '{"verdicts":[]}' ;; esac`}
+	}}
+	agents.Runtimes["contworker"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+		// Beta can't do its part until the user fixes something
+		return []string{"-c", `p=$(cat); case "$p" in *"You are Alpha"*) echo a > a.txt ;; *) test -f ` + fixed + ` && echo b > b.txt ;; esac; true`}
+	}}
+	defer delete(agents.Runtimes, "contmgr")
+	defer delete(agents.Runtimes, "contworker")
+
+	repo := newRepo(t)
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{
+		{ID: "m", Name: "Lead", Role: "manager", Runtime: "contmgr"},
+		{ID: "a", Name: "Alpha", Role: "programmer", Parent: "m", Runtime: "contworker"},
+		{ID: "b", Name: "Beta", Role: "programmer", Parent: "m", Runtime: "contworker"},
+	})
+	o.Store.SaveGoal("m", store.Goal{Title: "both files", Checks: "test -f a.txt && test -f b.txt"})
+	if err := o.Continue("m"); err == nil {
+		t.Fatal("nothing to continue before a run")
+	}
+	o.Start("m")
+	if g := waitDone(t, o, "m"); g.Status != "blocked" {
+		t.Fatalf("first run: %+v", g)
+	}
+	runs := func(id string) (n int) {
+		o.Store.SQL().QueryRow(`SELECT count(*) FROM runs WHERE agent_id=?`, id).Scan(&n)
+		return
+	}
+	ranA, ranB := runs("a"), runs("b")
+	os.WriteFile(fixed, nil, 0o644) // the user fixes what Beta needed
+	if err := o.Continue("m"); err != nil {
+		t.Fatal(err)
+	}
+	if g := waitDone(t, o, "m"); g.Status != "done" {
+		es, _ := o.Store.Events("m", 50)
+		t.Fatalf("continued run: %+v\n%+v", g, es)
+	}
+	if runs("a") != ranA || runs("b") <= ranB {
+		t.Fatalf("Alpha should keep its work (runs %d -> %d), Beta should run again (%d -> %d)", ranA, runs("a"), ranB, runs("b"))
+	}
+	for _, f := range []string{"a.txt", "b.txt"} {
+		if _, err := git.Run(repo, "cat-file", "-e", "arranger/m:"+f); err != nil {
+			t.Fatalf("%s should be merged into the manager", f)
+		}
+	}
+}

@@ -173,6 +173,11 @@ func (s *Store) RunningQueueItem(agentID string) (QueueItem, error) {
 	return scanQueueItem(s.db.QueryRow(`SELECT `+queueCols+` FROM queue WHERE agent_id=? AND status='running' LIMIT 1`, agentID))
 }
 
+// LastQueueItem is the goal of the agent's list that finished last; sql.ErrNoRows when none did.
+func (s *Store) LastQueueItem(agentID string) (QueueItem, error) {
+	return scanQueueItem(s.db.QueryRow(`SELECT `+queueCols+` FROM queue WHERE agent_id=? AND status NOT IN ('queued', 'running', 'skipped') ORDER BY finished DESC, id DESC LIMIT 1`, agentID))
+}
+
 // StartQueueItem marks a goal as running in the given log session.
 func (s *Store) StartQueueItem(id, session int64) {
 	s.db.Exec(`UPDATE queue SET status='running', session=? WHERE id=?`, session, id)

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS queue (
   criteria TEXT NOT NULL DEFAULT '', checks TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued',
   session INTEGER NOT NULL DEFAULT 0, finished INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS queue_agent ON queue(agent_id, status, pos);
+CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, about TEXT NOT NULL DEFAULT '', json TEXT NOT NULL, created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS plans (
   id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending', feedback TEXT NOT NULL DEFAULT '', created INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0);
@@ -448,6 +449,17 @@ func (s *Store) CheckpointGoal(sha string) string {
 		WHERE c.kind = 'msg' AND c.text LIKE 'checkpoint %' AND c.session != 0 AND length(c.text) > 14 AND ? LIKE substr(c.text, 12) || '%'
 		ORDER BY c.id DESC LIMIT 1`, sha).Scan(&title)
 	return strings.TrimSpace(title)
+}
+
+// LastDecision is the agent's latest decision of one of the kinds: its kind and JSON, or "" if none.
+func (s *Store) LastDecision(agentID string, kinds ...string) (kind, raw string) {
+	q := `SELECT kind, json FROM decisions WHERE agent_id=? AND kind IN (?` + strings.Repeat(",?", len(kinds)-1) + `) ORDER BY id DESC LIMIT 1`
+	args := []any{agentID}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	s.db.QueryRow(q, args...).Scan(&kind, &raw)
+	return
 }
 
 // AddDecision records a manager's plan or review verdicts.
