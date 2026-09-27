@@ -722,6 +722,26 @@ func TestReviseFinishedGoal(t *testing.T) {
 	}
 }
 
+// Compacting keeps only the newest part of the goal's feedback and notes; clearing empties them.
+func TestCompact(t *testing.T) {
+	a := newApp(t)
+	a.must(204, "POST", "/api/projects/"+a.pid+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
+	a.st.SetGoal("k", map[string]any{"feedback": strings.Repeat("f", 3000), "notes": strings.Repeat("n", 2500)})
+	a.must(404, "POST", "/api/agents/nobody/compact", "")
+	var res struct{ Before, After int }
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/compact", "")), &res)
+	if res.Before != 5500 || res.After >= res.Before || res.After > 2000 {
+		t.Fatalf("compact: %+v", res)
+	}
+	json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/compact", `{"clear":true}`)), &res)
+	if res.After != 0 {
+		t.Fatalf("clear: %+v", res)
+	}
+	if g, _ := a.st.Goal("k"); g.Feedback != "" || g.Notes != "" {
+		t.Fatalf("stored goal not cleared: %+v", g)
+	}
+}
+
 // Merging an agent's work lists every change from all its goals, not just the last goal.
 func TestMergeMessageListsEveryChange(t *testing.T) {
 	a := newApp(t)
