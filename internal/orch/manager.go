@@ -267,9 +267,48 @@ type revisionDraft struct {
 
 // proposePlan asks the manager to split its goal into a subgoal per report.
 func (j *job) proposePlan(g store.Goal, dir string, kids []store.Agent, byID map[string]store.Agent, feedback string) ([]subgoal, error) {
-	var plan planDraft
-	err := j.decide(planPrompt(j.a, g, kids, feedback, j.change), dir, &plan, func() error { return validatePlan(plan.Subgoals, byID) })
+	var plan struct {
+		Subgoals []subgoal `json:"subgoals"`
+		Repo     string    `json:"repo"` // its notes on the repository, for its next plan
+	}
+	err := j.decide(planPrompt(j.a, g, kids, feedback, j.change, j.repoText(g, dir)), dir, &plan, func() error { return validatePlan(plan.Subgoals, byID) })
+	if err == nil && strings.TrimSpace(plan.Repo) != "" {
+		j.saveRepoNotes(plan.Repo, dir)
+	}
 	return plan.Subgoals, err
+}
+
+// maxRepoNotes caps a manager's notes on the repository, which go into every prompt it plans with.
+const maxRepoNotes = 4000
+
+// repoText is the manager's notes on the repository from its last plan, with the files changed
+// since, for its next prompt; "" before it has any.
+func (j *job) repoText(g store.Goal, dir string) string {
+	if strings.TrimSpace(g.RepoNotes) == "" {
+		return ""
+	}
+	changed := "(couldn't tell: the commit the notes describe is gone; check anything they rely on)"
+	if out, err := git.Run(dir, "diff", "--name-only", g.RepoSHA, "HEAD"); err == nil {
+		fs := lines(out)
+		if len(fs) > 40 {
+			fs = append(fs[:40], fmt.Sprintf("and %d more", len(fs)-40))
+		}
+		changed = strings.Join(fs, "\n")
+	}
+	return repoText(g.RepoNotes, g.RepoSHA, changed)
+}
+
+// saveRepoNotes keeps the manager's notes on the repository, and the commit they describe, for its next plan.
+func (j *job) saveRepoNotes(notes, dir string) {
+	head, err := git.Run(dir, "rev-parse", "HEAD")
+	if err != nil {
+		return
+	}
+	notes = strings.TrimSpace(notes)
+	if len(notes) > maxRepoNotes {
+		notes = notes[:maxRepoNotes]
+	}
+	j.o.Store.SetGoal(j.a.ID, map[string]any{"repo_notes": notes, "repo_sha": strings.TrimSpace(head)})
 }
 
 // apply saves a plan (sgs) or a routed change (cs) to the reports and returns who runs.
@@ -298,7 +337,7 @@ func (j *job) applyPlan(sgs []subgoal, byID map[string]store.Agent) []store.Agen
 func (j *job) proposeRevision(g store.Goal, dir string, kids []store.Agent, byID map[string]store.Agent, goals map[string]store.Goal,
 	feedback string) ([]revision, error) {
 	var rev revisionDraft
-	err := j.decide(revisePrompt(j.a, g, kids, goals, j.change, feedback), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
+	err := j.decide(revisePrompt(j.a, g, kids, goals, j.change, feedback, j.repoText(g, dir)), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
 	return rev.Changes, err
 }
 
@@ -347,7 +386,7 @@ func names(as []store.Agent) string {
 func (j *job) proposeFix(g store.Goal, dir string, kids []store.Agent, byID map[string]store.Agent, goals map[string]store.Goal,
 	failure string) ([]revision, error) {
 	var rev revisionDraft
-	err := j.decide(fixPrompt(j.a, g, kids, goals, failure), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
+	err := j.decide(fixPrompt(j.a, g, kids, goals, failure, j.repoText(g, dir)), dir, &rev, func() error { return validateRevision(rev.Changes, byID, goals) })
 	return rev.Changes, err
 }
 
@@ -423,6 +462,7 @@ func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	res := map[string]string{}
+	team := teamText(j, kids)
 	for _, k := range kids {
 		ctx, cancel := context.WithCancel(j.ctx)
 		if !j.o.register(k.ID, cancel) {
@@ -430,7 +470,7 @@ func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string
 			res[k.ID] = "already running"
 			continue
 		}
-		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k, change: changes[k.ID], fix: fix && changes[k.ID] != ""}
+		kj := &job{o: j.o, ctx: ctx, p: j.p, a: k, change: changes[k.ID], fix: fix && changes[k.ID] != "", team: team[k.ID]}
 		kj.status("starting", nil) // the hand-off shows on the canvas at once, not after the worktree is ready
 		wg.Add(1)
 		go func(k store.Agent) {
@@ -445,6 +485,38 @@ func runChildren(j *job, kids []store.Agent, feedback, changes map[string]string
 	}
 	wg.Wait()
 	return res
+}
+
+// teamText tells each report what its manager is after, what its teammates in this run work on,
+// and the manager's notes on the repository, so it stays in its lane and reads less.
+func teamText(j *job, kids []store.Agent) map[string]string {
+	mg, _ := j.o.Store.Goal(j.a.ID)
+	titles := map[string]string{}
+	for _, k := range kids {
+		kg, _ := j.o.Store.Goal(k.ID)
+		titles[k.ID] = kg.Title
+	}
+	out := map[string]string{}
+	for _, k := range kids {
+		var b strings.Builder
+		fmt.Fprintf(&b, "THIS IS YOUR PART OF YOUR MANAGER'S GOAL: %s\n", mg.Title)
+		first := true
+		for _, o := range kids {
+			if o.ID == k.ID || titles[o.ID] == "" {
+				continue
+			}
+			if first {
+				b.WriteString("YOUR TEAMMATES WORK AT THE SAME TIME, EACH ON ITS OWN BRANCH. Leave their parts to them:\n")
+				first = false
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", o.Name, titles[o.ID])
+		}
+		if n := strings.TrimSpace(mg.RepoNotes); n != "" {
+			b.WriteString("YOUR MANAGER'S NOTES ON THE REPOSITORY (a starting point; the code is the truth):\n" + n + "\n")
+		}
+		out[k.ID] = b.String()
+	}
+	return out
 }
 
 // decide asks the manager's CLI for a JSON decision, decodes it into v and checks it with

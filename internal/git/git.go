@@ -479,6 +479,56 @@ func DefaultTarget(repo string) string {
 	return "main"
 }
 
+// Branches lists the repo's local branches, leaving out arranger's own agent branches.
+func Branches(repo string) []string {
+	out, _ := Run(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+	var bs []string
+	for _, b := range lines(out) {
+		if !strings.HasPrefix(b, "arranger/") {
+			bs = append(bs, b)
+		}
+	}
+	return bs
+}
+
+// Closest is the branch in bs most like name, when it's close enough to be a likely typo
+// (release/v1.0.4 for release/v0.1.4), else "".
+func Closest(name string, bs []string) string {
+	best, bestD := "", 4
+	for _, b := range bs {
+		if d := editDistance(name, b); d > 0 && d < bestD && d <= max(1, len(name)/3) {
+			best, bestD = b, d
+		}
+	}
+	return best
+}
+
+// editDistance counts the single-character edits (insert, delete, replace, or swap of two
+// neighbours) that turn a into b.
+func editDistance(a, b string) int {
+	d := make([][]int, len(a)+1)
+	for i := range d {
+		d[i] = make([]int, len(b)+1)
+		d[i][0] = i
+	}
+	for j := range d[0] {
+		d[0][j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			d[i][j] = min(d[i-1][j]+1, d[i][j-1]+1, d[i-1][j-1]+cost)
+			if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
+				d[i][j] = min(d[i][j], d[i-2][j-2]+1)
+			}
+		}
+	}
+	return d[len(a)][len(b)]
+}
+
 type MergePreview struct {
 	Source     string   `json:"source"`
 	Target     string   `json:"target"`
@@ -496,6 +546,10 @@ type MergePreview struct {
 	// Uncommitted counts files changed in the source's worktree since its last checkpoint. They
 	// aren't in the numbers above; merging commits them first.
 	Uncommitted int `json:"uncommitted"`
+	// Branches are the repo's branches, to pick the target from; Similar is the existing branch a
+	// target that doesn't exist probably meant.
+	Branches []string `json:"branches"`
+	Similar  string   `json:"similar"`
 }
 
 // Uncommitted counts the files changed in the worktree at dir that aren't committed yet, without
@@ -507,7 +561,10 @@ func Uncommitted(dir string) int {
 
 // PreviewMerge reports what merging source into target would do, without changing anything.
 func PreviewMerge(repo, source, target, start string) (MergePreview, error) {
-	m := MergePreview{Source: source, Target: target, Start: start, Exists: BranchExists(repo, target), Conflicts: []string{}}
+	m := MergePreview{Source: source, Target: target, Start: start, Exists: BranchExists(repo, target), Conflicts: []string{}, Branches: Branches(repo)}
+	if !m.Exists {
+		m.Similar = Closest(target, m.Branches)
+	}
 	into := target
 	if !m.Exists {
 		into = start

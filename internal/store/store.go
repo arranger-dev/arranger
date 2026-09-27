@@ -73,6 +73,8 @@ var migrations = []string{
 	`UPDATE queue SET status = 'stopped' WHERE status = 'running'`,
 	`UPDATE agents SET queue_active = 0`,
 	`UPDATE plans SET status = 'expired', decided = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE status = 'pending'`,
+	`ALTER TABLE goals ADD COLUMN repo_notes TEXT NOT NULL DEFAULT ''`, // a manager's notes on the repo from its last plan, reused by the next
+	`ALTER TABLE goals ADD COLUMN repo_sha TEXT NOT NULL DEFAULT ''`,   // the commit repo_notes describe
 }
 
 type Project struct {
@@ -126,6 +128,10 @@ type Goal struct {
 	Base     string `json:"base"`
 	Notes    string `json:"notes"`
 	From     string `json:"from"` // the branch Base came from: its manager's, or the project base
+	// RepoNotes is what a manager learned about the repo when it last planned, at commit RepoSHA;
+	// its next plan starts from them instead of reading the repo again.
+	RepoNotes string `json:"-"`
+	RepoSHA   string `json:"-"`
 }
 
 // LogEvent is one line of an agent's activity log.
@@ -358,8 +364,8 @@ func (s *Store) SaveArrangement(projectID string, as []Agent) error {
 
 // Goal returns an agent's goal; an agent without one gets an empty, idle goal.
 func (s *Store) Goal(agentID string) (g Goal, err error) {
-	err = s.db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes, from_branch FROM goals WHERE agent_id=?`, agentID).
-		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes, &g.From)
+	err = s.db.QueryRow(`SELECT title, body, criteria, checks, status, attempts, feedback, passed, total, adds, dels, base, notes, from_branch, repo_notes, repo_sha FROM goals WHERE agent_id=?`, agentID).
+		Scan(&g.Title, &g.Body, &g.Criteria, &g.Checks, &g.Status, &g.Attempts, &g.Feedback, &g.Passed, &g.Total, &g.Adds, &g.Dels, &g.Base, &g.Notes, &g.From, &g.RepoNotes, &g.RepoSHA)
 	if err == sql.ErrNoRows {
 		return Goal{Status: "idle"}, nil
 	}

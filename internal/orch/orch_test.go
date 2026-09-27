@@ -752,3 +752,53 @@ func TestContinueBlockedRun(t *testing.T) {
 		}
 	}
 }
+
+// A manager's plan leaves notes on the repo; its next plan gets them back with what changed since,
+// instead of reading the repo again, and its reports get them with their teammates' parts.
+func TestManagerReusesRepoNotes(t *testing.T) {
+	o := setup(t)
+	prompts := t.TempDir()
+	plain := func(l []byte) []agents.Event { return []agents.Event{{Kind: "msg", Text: string(l)}} }
+	agents.Runtimes["notesmgr"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+		return []string{"-c", `p=$(cat); case "$p" in
+*"YOUR TEAM:"*) n=$(ls ` + prompts + ` | wc -l | tr -d ' '); printf '%s' "$p" > ` + prompts + `/plan$n
+  echo '{"subgoals":[{"agent":"a","title":"write a","checks":["test -f a.txt"]},{"agent":"b","title":"write b","checks":["test -f b.txt"]}],"repo":"NOTES: the code lives in src"}' ;;
+*) echo '{"verdicts":[{"agent":"a","accept":true},{"agent":"b","accept":true}]}' ;;
+esac`}
+	}}
+	agents.Runtimes["notesworker"] = agents.Runtime{Bin: "sh", Parse: plain, Args: func(string) []string {
+		return []string{"-c", `p=$(cat); case "$p" in *"You are Alpha"*) printf '%s' "$p" > ` + prompts + `/../alpha.txt; date +%N >> a.txt ;; *) date +%N >> b.txt ;; esac; echo worked`}
+	}}
+	defer delete(agents.Runtimes, "notesmgr")
+	defer delete(agents.Runtimes, "notesworker")
+
+	repo := newRepo(t)
+	p, _ := o.Store.CreateProject(store.Project{Name: "t", Repo: repo, Base: "main"})
+	o.Store.SaveArrangement(p.ID, []store.Agent{
+		{ID: "m", Name: "Lead", Role: "manager", Runtime: "notesmgr"},
+		{ID: "a", Name: "Alpha", Role: "coder", Parent: "m", Runtime: "notesworker"},
+		{ID: "b", Name: "Beta", Role: "coder", Parent: "m", Runtime: "notesworker"},
+	})
+	for i, title := range []string{"first goal", "second goal"} {
+		o.Store.SaveGoal("m", store.Goal{Title: title, Checks: "test -f a.txt && test -f b.txt"})
+		if err := o.Start("m"); err != nil {
+			t.Fatal(err)
+		}
+		if g := waitDone(t, o, "m"); g.Status != "done" {
+			t.Fatalf("goal %d: %+v", i+1, g)
+		}
+	}
+	first, _ := os.ReadFile(filepath.Join(prompts, "plan0"))
+	second, _ := os.ReadFile(filepath.Join(prompts, "plan1"))
+	if strings.Contains(string(first), "WHAT YOU ALREADY KNOW") {
+		t.Fatal("the first plan has no notes to reuse")
+	}
+	if !strings.Contains(string(second), "WHAT YOU ALREADY KNOW ABOUT THE REPOSITORY") || !strings.Contains(string(second), "NOTES: the code lives in src") ||
+		!strings.Contains(string(second), "a.txt") {
+		t.Fatalf("the second plan should reuse the notes and list what changed:\n%s", second)
+	}
+	alpha, _ := os.ReadFile(filepath.Join(prompts, "..", "alpha.txt"))
+	if !strings.Contains(string(alpha), "- Beta: write b") || !strings.Contains(string(alpha), "NOTES: the code lives in src") || !strings.Contains(string(alpha), "second goal") {
+		t.Fatalf("a report should see its manager's goal, its teammates' parts and the repo notes:\n%s", alpha)
+	}
+}

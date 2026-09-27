@@ -332,3 +332,21 @@ func TestEnsureWorktreeConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// A mistyped target is matched to the branch it probably meant; a new name that's nothing like
+// an existing branch isn't.
+func TestClosest(t *testing.T) {
+	bs := []string{"main", "release/v0.1.4", "release/0.1.3", "feature/login"}
+	for name, want := range map[string]string{
+		"release/v1.0.4": "release/v0.1.4", // 0 and 1 swapped
+		"release/v0.1.5": "release/v0.1.4",
+		"mian":           "main",
+		"main":           "", // it exists; nothing to suggest
+		"docker":         "",
+		"feature/signup": "",
+	} {
+		if got := Closest(name, bs); got != want {
+			t.Errorf("Closest(%q) = %q, want %q", name, got, want)
+		}
+	}
+}

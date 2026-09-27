@@ -2,10 +2,8 @@ package server
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -192,14 +190,10 @@ func (s *Server) saveGoal(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// compact shrinks the goal's carried context (feedback and notes) to its newest 1000
-// characters each, or empties it with {"clear":true}, so the next prompt is smaller.
+// compact shrinks the notes on removed changes that the agent's every prompt carries (see
+// compactNotes). They're the only context carried from run to run: each run starts a fresh agent
+// session, and a failure's output only goes into the retries of the run it happened in.
 func (s *Server) compact(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Clear bool }
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		fail(w, http.StatusBadRequest, err)
-		return
-	}
 	a, _, err := s.st.Agent(r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "agent not found", http.StatusNotFound)
@@ -214,19 +208,9 @@ func (s *Server) compact(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusInternalServerError, err)
 		return
 	}
-	before := len(g.Feedback) + len(g.Notes)
-	keep := func(v string) string {
-		if req.Clear {
-			return ""
-		}
-		if len(v) > 1000 {
-			return v[len(v)-1000:]
-		}
-		return v
-	}
-	g.Feedback, g.Notes = keep(g.Feedback), keep(g.Notes)
-	s.st.SetGoal(a.ID, map[string]any{"feedback": g.Feedback, "notes": g.Notes})
-	writeJSON(w, map[string]int{"before": before, "after": len(g.Feedback) + len(g.Notes)})
+	notes := compactNotes(g.Notes)
+	s.st.SetGoal(a.ID, map[string]any{"notes": notes})
+	writeJSON(w, map[string]int{"before": len(g.Notes), "after": len(notes)})
 }
 
 func (s *Server) run(w http.ResponseWriter, r *http.Request) {
