@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"arranger/internal/agents"
+	"arranger/internal/git"
 	"arranger/internal/store"
 )
 
@@ -72,6 +74,18 @@ type check struct {
 	Why string `json:"why"`
 }
 
+// newTestCheck suggests a heuristic check that fails unless the diff against the repo's default
+// branch touches a file matching pattern: it catches "tests pass" checks that would pass even if
+// the goal added no test at all. It's a filename heuristic, not real coverage: a test added to an
+// existing test file it doesn't rename, or an inline test in a non-matching file, slips through.
+func newTestCheck(repo, pattern, label string) check {
+	target := git.DefaultTarget(repo)
+	return check{
+		fmt.Sprintf("git diff --stat %s... | grep -q '%s'", target, pattern),
+		fmt.Sprintf("heuristic: fails unless the diff touches a %s file; doesn't check the test actually covers the change", label),
+	}
+}
+
 // suggestChecks reads the repo's build files and suggests checks that prove work is done.
 func suggestChecks(repo string) []check {
 	cs := []check{}
@@ -80,7 +94,12 @@ func suggestChecks(repo string) []check {
 		return cs
 	}
 	if has("go.mod") {
-		cs = append(cs, check{"go build ./...", "it compiles"}, check{"go vet ./...", "no suspicious code"}, check{"go test ./...", "the tests pass"})
+		cs = append(cs,
+			check{"go build ./...", "it compiles"},
+			check{"go vet ./...", "no suspicious code"},
+			check{"go test ./...", "the existing tests still pass; won't fail if the goal added no test for its own change"},
+			newTestCheck(repo, `_test\.go`, "_test.go"),
+		)
 	}
 	if has("package.json") {
 		pm := "npm"
@@ -96,22 +115,34 @@ func suggestChecks(repo string) []check {
 		if b, err := os.ReadFile(filepath.Join(repo, "package.json")); err == nil {
 			json.Unmarshal(b, &pkg)
 		}
-		for _, s := range []struct{ name, why string }{{"build", "it builds"}, {"typecheck", "types check"}, {"lint", "lint passes"}, {"test", "the tests pass"}} {
+		for _, s := range []struct{ name, why string }{
+			{"build", "it builds"},
+			{"typecheck", "types check"},
+			{"lint", "lint passes"},
+			{"test", "the existing tests still pass; won't fail if the goal added no test for its own change"},
+		} {
 			if sc, ok := pkg.Scripts[s.name]; ok && !strings.Contains(sc, "no test specified") {
 				cs = append(cs, check{pm + " run " + s.name, s.why})
+				if s.name == "test" {
+					cs = append(cs, newTestCheck(repo, `\.(test|spec)\.[jt]sx\?`, ".test./.spec."))
+				}
 			}
 		}
 	}
 	if has("Cargo.toml") {
-		cs = append(cs, check{"cargo build", "it compiles"}, check{"cargo test", "the tests pass"})
+		cs = append(cs, check{"cargo build", "it compiles"}, check{"cargo test", "the existing tests still pass; won't fail if the goal added no test for its own change"})
 	}
 	if has("pyproject.toml") || has("setup.py") || has("requirements.txt") {
-		cs = append(cs, check{"python3 -m pytest -q", "the tests pass"})
+		cs = append(cs, check{"python3 -m pytest -q", "the existing tests still pass; won't fail if the goal added no test for its own change"}, newTestCheck(repo, `test_.*\.py\|_test\.py`, "test_*.py / *_test.py"))
 	}
 	if b, err := os.ReadFile(filepath.Join(repo, "Makefile")); err == nil {
 		for _, target := range []string{"test", "check", "lint"} {
 			if strings.Contains("\n"+string(b), "\n"+target+":") {
-				cs = append(cs, check{"make " + target, "make " + target + " passes"})
+				why := "make " + target + " passes"
+				if target == "test" {
+					why += "; won't fail if the goal added no test for its own change"
+				}
+				cs = append(cs, check{"make " + target, why})
 			}
 		}
 	}

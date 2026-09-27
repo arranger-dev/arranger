@@ -766,7 +766,7 @@ func TestSuggestChecks(t *testing.T) {
 	for _, c := range suggestChecks(repo) {
 		got = append(got, c.Cmd)
 	}
-	want := "go build ./...|go vet ./...|go test ./...|pnpm run build|pnpm run lint|make test"
+	want := "go build ./...|go vet ./...|go test ./...|git diff --stat main... | grep -q '_test\\.go'|pnpm run build|pnpm run lint|make test"
 	if strings.Join(got, "|") != want {
 		t.Fatalf("got  %s\nwant %s", strings.Join(got, "|"), want)
 	}
