@@ -68,10 +68,22 @@ func tools(ctx context.Context) []tool {
 	return ts
 }
 
-// check is a shell check that fits the repo, and what it proves.
+// check is a shell check that fits the repo, and what it proves. Specific checks prove the goal's
+// own work: they fail before it's done. The rest (a build, the whole test suite) already pass on the
+// code as it is, so they only prove nothing broke. Edit is a placeholder in Cmd the user replaces
+// with something from their goal, e.g. the name of the test that proves it.
 type check struct {
-	Cmd string `json:"cmd"`
-	Why string `json:"why"`
+	Cmd      string `json:"cmd"`
+	Why      string `json:"why"`
+	Specific bool   `json:"specific,omitempty"`
+	Edit     string `json:"edit,omitempty"`
+}
+
+// changedCheck suggests a check that fails when the goal's work changed nothing at all, so an agent
+// that only claims success can't pass on checks that already passed before it started.
+func changedCheck(repo string) check {
+	return check{Cmd: fmt.Sprintf("! git diff --quiet %s...", git.DefaultTarget(repo)),
+		Why: "the work changed something; fails if the agent changed no file", Specific: true}
 }
 
 // newTestCheck suggests a heuristic check that fails unless the diff against the repo's default
@@ -81,8 +93,9 @@ type check struct {
 func newTestCheck(repo, pattern, label string) check {
 	target := git.DefaultTarget(repo)
 	return check{
-		fmt.Sprintf("git diff --stat %s... | grep -q '%s'", target, pattern),
-		fmt.Sprintf("heuristic: fails unless the diff touches a %s file; doesn't check the test actually covers the change", label),
+		Cmd:      fmt.Sprintf("git diff --stat %s... | grep -q '%s'", target, pattern),
+		Why:      fmt.Sprintf("heuristic: fails unless the diff touches a %s file; doesn't check the test actually covers the change", label),
+		Specific: true,
 	}
 }
 
@@ -93,12 +106,19 @@ func suggestChecks(repo string) []check {
 	if repo == "" {
 		return cs
 	}
+	cs = append(cs, changedCheck(repo))
 	if has("go.mod") {
+		target := git.DefaultTarget(repo)
 		cs = append(cs,
-			check{"go build ./...", "it compiles"},
-			check{"go vet ./...", "no suspicious code"},
-			check{"go test ./...", "the existing tests still pass; won't fail if the goal added no test for its own change"},
+			// checks that prove this goal's work, not just that nothing broke
+			check{Cmd: `t=TestName; go test -run "^$t\$" -v ./... | grep -q -- "--- PASS: $t "`,
+				Why: "a test named for this goal exists and passes; can't pass by matching no test. Replace TestName", Specific: true, Edit: "TestName"},
+			check{Cmd: fmt.Sprintf(`p=$(git diff --name-only %s... -- '*.go' | sed -e 's|[^/]*$||' -e 's|^|./|' | sort -u); test -n "$p" && go test $p`, target),
+				Why: "the tests of the packages the goal changed pass; fails if it changed no Go code", Specific: true},
 			newTestCheck(repo, `_test\.go`, "_test.go"),
+			check{Cmd: "go build ./...", Why: "it compiles"},
+			check{Cmd: "go vet ./...", Why: "no suspicious code"},
+			check{Cmd: "go test ./...", Why: "the existing tests still pass; won't fail if the goal added no test for its own change"},
 		)
 	}
 	if has("package.json") {
@@ -122,7 +142,7 @@ func suggestChecks(repo string) []check {
 			{"test", "the existing tests still pass; won't fail if the goal added no test for its own change"},
 		} {
 			if sc, ok := pkg.Scripts[s.name]; ok && !strings.Contains(sc, "no test specified") {
-				cs = append(cs, check{pm + " run " + s.name, s.why})
+				cs = append(cs, check{Cmd: pm + " run " + s.name, Why: s.why})
 				if s.name == "test" {
 					cs = append(cs, newTestCheck(repo, `\.(test|spec)\.[jt]sx\?`, ".test./.spec."))
 				}
@@ -130,10 +150,12 @@ func suggestChecks(repo string) []check {
 		}
 	}
 	if has("Cargo.toml") {
-		cs = append(cs, check{"cargo build", "it compiles"}, check{"cargo test", "the existing tests still pass; won't fail if the goal added no test for its own change"})
+		cs = append(cs, check{Cmd: "t=test_name; cargo test $t -- --exact 2>&1 | grep -q \"test .*$t ... ok\"", Why: "a test named for this goal exists and passes. Replace test_name", Specific: true, Edit: "test_name"},
+			check{Cmd: "cargo build", Why: "it compiles"}, check{Cmd: "cargo test", Why: "the existing tests still pass; won't fail if the goal added no test for its own change"})
 	}
 	if has("pyproject.toml") || has("setup.py") || has("requirements.txt") {
-		cs = append(cs, check{"python3 -m pytest -q", "the existing tests still pass; won't fail if the goal added no test for its own change"}, newTestCheck(repo, `test_.*\.py\|_test\.py`, "test_*.py / *_test.py"))
+		cs = append(cs, check{Cmd: "python3 -m pytest -q -k test_name | grep -q ' passed'", Why: "a test named for this goal exists and passes; pytest exits 5 when nothing matches. Replace test_name", Specific: true, Edit: "test_name"},
+			check{Cmd: "python3 -m pytest -q", Why: "the existing tests still pass; won't fail if the goal added no test for its own change"}, newTestCheck(repo, `test_.*\.py\|_test\.py`, "test_*.py / *_test.py"))
 	}
 	if b, err := os.ReadFile(filepath.Join(repo, "Makefile")); err == nil {
 		for _, target := range []string{"test", "check", "lint"} {
@@ -142,7 +164,7 @@ func suggestChecks(repo string) []check {
 				if target == "test" {
 					why += "; won't fail if the goal added no test for its own change"
 				}
-				cs = append(cs, check{"make " + target, why})
+				cs = append(cs, check{Cmd: "make " + target, Why: why})
 			}
 		}
 	}

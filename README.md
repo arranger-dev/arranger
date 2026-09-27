@@ -54,7 +54,7 @@ You also need `git`, and at least one agent CLI on your `PATH` (for example `cla
    - **Acceptance criteria:** what reviewers should hold the work to.
    - **Checks:** one shell command per line. All of them must exit 0, e.g. `go test ./...`.
 
-5. **Run.** Press **Run** and confirm the goals it will work through. They run one after another, each on the code the one before it left: a manager plans one subgoal (with its own checks) for each report, runs them in parallel, reviews and merges their work into its own branch, then runs its own checks. If a goal fails, it stops there or goes on with the next, as you choose. Links on the canvas animate while agents hand work down and report back, and the **Logs** tab shows each goal's run.
+5. **Run.** Press **Run** and confirm the goals it will work through. They run one after another, each on the code the one before it left: a manager plans one subgoal (with its own checks) for each report the goal needs (the others don't run), runs them in parallel, reviews and merges their work into its own branch, then runs its own checks. If a goal fails, it stops there or goes on with the next, as you choose. Links on the canvas animate while agents hand work down and report back, and the **Logs** tab shows each goal's run.
 
    Want to check the plan first? Tick **Let me approve the plan before the team runs** under the manager's goals. The manager then stops after planning and shows you each report's goal and checks: edit them, skip or add reports, send the plan back with feedback, or approve it to start the team.
 

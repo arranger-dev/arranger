@@ -189,11 +189,8 @@ func (s *Server) hunks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		git.Commit(wk.dir, fmt.Sprintf("Remove %d change(s) by hand in the Diff tab\n\nThe agent won't add them back.", n))
-		notes := wk.g.Notes + patch
-		if len(notes) > 8000 { // keep the newest removals; the prompt shouldn't grow without bound
-			notes = notes[len(notes)-8000:]
-		}
-		s.st.SetGoal(wk.a.ID, map[string]any{"notes": notes})
+		// keep the newest removals; the prompt shouldn't grow without bound
+		s.st.SetGoal(wk.a.ID, map[string]any{"notes": newestFiles(wk.g.Notes+patch, 8000)})
 		s.changed(wk.p, wk.a, wk.dir, wk.g.Base)
 	case "promote":
 		mgr, _, err := s.st.Agent(wk.a.Parent)
@@ -256,7 +253,10 @@ func (s *Server) merge(w http.ResponseWriter, r *http.Request) {
 		req.Target = r.URL.Query().Get("target")
 	}
 	if req.Target = strings.TrimSpace(req.Target); req.Target == "" {
-		req.Target = git.DefaultTarget(wk.p.Repo)
+		req.Target = wk.p.Base // the branch the project works from, where its work usually goes back
+		if !git.BranchExists(wk.p.Repo, req.Target) {
+			req.Target = git.DefaultTarget(wk.p.Repo)
+		}
 	}
 	if _, err := git.Run(wk.p.Repo, "check-ref-format", "--branch", req.Target); err != nil || strings.HasPrefix(req.Target, "arranger/") {
 		fail(w, http.StatusBadRequest, fmt.Errorf("%q isn't a branch name you can merge into", req.Target))
@@ -284,6 +284,7 @@ func (s *Server) merge(w http.ResponseWriter, r *http.Request) {
 	if req.Message == "" {
 		req.Message = "Merge work from " + wk.a.Name
 	}
+	created := !git.BranchExists(wk.p.Repo, req.Target)
 	sha, err := git.MergeInto(wk.p.Repo, git.BranchOf(wk.a.ID), req.Target, wk.p.Base, req.Strategy, req.Message)
 	if err != nil {
 		fail(w, http.StatusConflict, err)
@@ -292,5 +293,37 @@ func (s *Server) merge(w http.ResponseWriter, r *http.Request) {
 	e := store.LogEvent{Agent: wk.a.ID, Kind: "merge", Text: fmt.Sprintf("merged into %s (%s) → %s", req.Target, req.Strategy, sha)}
 	s.st.AddEvent(&e)
 	s.o.Hub.Publish(wk.p.ID, map[string]any{"type": "event", "event": e})
-	writeJSON(w, map[string]string{"sha": sha, "target": req.Target})
+	writeJSON(w, map[string]any{"sha": sha, "target": req.Target, "created": created})
+}
+
+// newestFiles keeps the newest whole files of a diff that fit in max bytes, so a cut never lands
+// mid-hunk. A single file bigger than max keeps its newest max bytes.
+func newestFiles(d string, max int) string {
+	if len(d) <= max {
+		return d
+	}
+	tail := d[len(d)-max:]
+	if i := strings.Index(tail, "diff --git "); i >= 0 {
+		return tail[i:]
+	}
+	return tail
+}
+
+// compactNotes shrinks the changes the user removed, which every prompt of the agent carries, to
+// what the agent needs to not re-add them: each file and its added and removed lines. Hunk headers,
+// index lines and unchanged context go. Compacting compacted notes changes nothing.
+func compactNotes(notes string) string {
+	var b strings.Builder
+	for _, l := range strings.Split(notes, "\n") {
+		switch {
+		case strings.HasPrefix(l, "diff --git "):
+			b.WriteString(l + "\n")
+		case strings.HasPrefix(l, "+++ "), strings.HasPrefix(l, "--- "):
+		case strings.HasPrefix(l, "+"), strings.HasPrefix(l, "-"):
+			if strings.TrimSpace(l[1:]) != "" { // blank added or removed lines say nothing
+				b.WriteString(l + "\n")
+			}
+		}
+	}
+	return newestFiles(b.String(), 4000)
 }

@@ -305,8 +305,9 @@ type job struct {
 	// change is what the user asked to change since the last run (or, for a report, the part of
 	// it its manager passed down). "" for a plain run from the goal.
 	change string
-	fix    bool // change is a fix the manager asks for because the team's merged work fails its checks
-	cont   bool // continuing a blocked run: same plan, only unfinished reports run
+	fix    bool   // change is a fix the manager asks for because the team's merged work fails its checks
+	cont   bool   // continuing a blocked run: same plan, only unfinished reports run
+	team   string // for a report: its manager's goal, its teammates' parts, its manager's notes on the repo
 
 	allow []string // shell commands the agent may run without asking: a worker's own checks
 
@@ -393,7 +394,7 @@ func runWorker(j *job, g store.Goal, dir, feedback string) string {
 		j.newRun(attempt)
 		j.emit("msg", fmt.Sprintf("attempt %d/%d with %s", attempt, maxAttempts, j.a.Runtime), "")
 
-		summary, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change, j.fix), dir)
+		summary, agentErr := runAgent(j, workerPrompt(j.a, g, dir, checks, feedback, j.change, j.fix, j.team), dir)
 		msg := checkpointMessage(summary, j.change, g.Title)
 		if sha, err := git.Commit(dir, msg); err != nil {
 			j.emit("error", err.Error(), "")

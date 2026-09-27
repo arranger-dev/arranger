@@ -722,23 +722,30 @@ func TestReviseFinishedGoal(t *testing.T) {
 	}
 }
 
-// Compacting keeps only the newest part of the goal's feedback and notes; clearing empties them.
+// Compacting shrinks the notes on removed changes to each file's added and removed lines, keeps
+// the newest files when that's still too much, and leaves already compacted notes alone.
 func TestCompact(t *testing.T) {
 	a := newApp(t)
 	a.must(204, "POST", "/api/projects/"+a.pid+"/arrangement", `[{"id":"k","name":"Kid","role":"programmer"}]`)
-	a.st.SetGoal("k", map[string]any{"feedback": strings.Repeat("f", 3000), "notes": strings.Repeat("n", 2500)})
+	patch := "diff --git a/x.go b/x.go\nindex 1..2 100644\n--- a/x.go\n+++ b/x.go\n@@ -1,3 +1,3 @@\n ctx\n-old line\n+new line\n+\n ctx\n"
+	a.st.SetGoal("k", map[string]any{"notes": patch})
 	a.must(404, "POST", "/api/agents/nobody/compact", "")
 	var res struct{ Before, After int }
 	json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/compact", "")), &res)
-	if res.Before != 5500 || res.After >= res.Before || res.After > 2000 {
-		t.Fatalf("compact: %+v", res)
+	want := "diff --git a/x.go b/x.go\n-old line\n+new line\n"
+	if g, _ := a.st.Goal("k"); g.Notes != want || res.Before != len(patch) || res.After != len(want) {
+		t.Fatalf("compact: %+v, notes %q", res, g.Notes)
 	}
-	json.Unmarshal([]byte(a.must(200, "POST", "/api/agents/k/compact", `{"clear":true}`)), &res)
-	if res.After != 0 {
-		t.Fatalf("clear: %+v", res)
+	a.must(200, "POST", "/api/agents/k/compact", "")
+	if g, _ := a.st.Goal("k"); g.Notes != want {
+		t.Fatalf("compacting again changed the notes: %q", g.Notes)
 	}
-	if g, _ := a.st.Goal("k"); g.Feedback != "" || g.Notes != "" {
-		t.Fatalf("stored goal not cleared: %+v", g)
+
+	big := strings.Repeat(patch, 400)
+	a.st.SetGoal("k", map[string]any{"notes": big})
+	a.must(200, "POST", "/api/agents/k/compact", "")
+	if g, _ := a.st.Goal("k"); len(g.Notes) > 4000 || !strings.HasPrefix(g.Notes, "diff --git ") {
+		t.Fatalf("big notes should keep whole newest files under 4000 bytes: %d bytes, starts %q", len(g.Notes), g.Notes[:20])
 	}
 }
 
@@ -786,9 +793,16 @@ func TestSuggestChecks(t *testing.T) {
 	for _, c := range suggestChecks(repo) {
 		got = append(got, c.Cmd)
 	}
-	want := "go build ./...|go vet ./...|go test ./...|git diff --stat main... | grep -q '_test\\.go'|pnpm run build|pnpm run lint|make test"
+	// checks that prove the goal's own work come first, then the ones that only prove nothing broke
+	want := "! git diff --quiet main...|" +
+		`t=TestName; go test -run "^$t\$" -v ./... | grep -q -- "--- PASS: $t "|` +
+		`p=$(git diff --name-only main... -- '*.go' | sed -e 's|[^/]*$||' -e 's|^|./|' | sort -u); test -n "$p" && go test $p|` +
+		"git diff --stat main... | grep -q '_test\\.go'|go build ./...|go vet ./...|go test ./...|pnpm run build|pnpm run lint|make test"
 	if strings.Join(got, "|") != want {
 		t.Fatalf("got  %s\nwant %s", strings.Join(got, "|"), want)
+	}
+	if cs := suggestChecks(repo); cs[1].Edit != "TestName" || !strings.Contains(cs[1].Cmd, cs[1].Edit) {
+		t.Fatalf("the named-test check should say what to replace: %+v", cs[1])
 	}
 	if len(suggestChecks("")) != 0 {
 		t.Fatal("no repo, no suggestions")

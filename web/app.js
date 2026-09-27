@@ -97,12 +97,15 @@ function layout(all) {
 }
 
 // linkFlow says whether the link between a manager and a report is live, and which way it moves:
-// "down" while the manager hands out subgoals (planning, or the report is just starting),
-// "up" while the report works for its manager, or the manager reviews what it sent back.
-function linkFlow(mgrStatus, kidStatus) {
-  if (kidStatus === "starting" || mgrStatus === "planning" || mgrStatus === "fixing") return { dir: "down", status: kidStatus === "starting" ? kidStatus : mgrStatus };
-  if (BUSY.includes(kidStatus)) return { dir: "up", status: kidStatus };
-  if (mgrStatus === "reviewing" && kidStatus === "done") return { dir: "up", status: mgrStatus };
+// "down" while the manager hands the report work (it's just starting), "up" while the report works
+// for its manager, or the manager reviews what it sent back. Only reports working on the manager's
+// current goal light up: not the ones its plan leaves out, nor work finished for an earlier goal.
+function linkFlow(mgrId, kidId) {
+  const m = summary.agents[mgrId] ?? {}, k = summary.agents[kidId] ?? {};
+  const ms = cardOf(mgrId)?.dataset.status, ks = cardOf(kidId)?.dataset.status;
+  if (ks === "starting") return { dir: "down", status: ks };
+  if (BUSY.includes(ks)) return { dir: "up", status: ks };
+  if (ms === "reviewing" && ks === "done" && m.since && k.since >= m.since) return { dir: "up", status: ms };
   return null;
 }
 
@@ -116,7 +119,7 @@ function drawLinks() {
     const bend = Math.max(40, Math.abs(y2 - y1) / 2);
     const path = document.createElementNS(SVG, "path");
     path.setAttribute("d", `M${x1},${y1} C${x1},${y1 + bend} ${x2},${y2 - bend} ${x2},${y2}`);
-    const flow = linkFlow(p.el.dataset.status, a.el.dataset.status);
+    const flow = linkFlow(p.id, a.id);
     if (flow) {
       path.dataset.status = flow.status;
       path.classList.add("flow", flow.dir);
@@ -421,19 +424,7 @@ async function removeAgents(ids) {
 }
 canvas.addEventListener("click", e => {
   if (e.target.classList.contains("x")) removeAgent(e.target.closest(".card").dataset.id);
-  if (e.target.matches(".acts button")) compactAgent(e);
 });
-// compactAgent shrinks (or with the clear button, drops) the feedback and notes carried into the agent's next prompt.
-async function compactAgent(e) {
-  e.stopPropagation();
-  const id = e.target.closest(".card").dataset.id, clear = e.target.classList.contains("clear");
-  if (clear && !confirm(`Clear the feedback and notes carried into ${nameOf(id)}'s next prompt?`)) return;
-  try {
-    const r = await api("POST", `/api/agents/${id}/compact`, clear ? { clear: true } : undefined);
-    say(`${clear ? "cleared" : "compacted"} ${nameOf(id)}: ${fmtTok(r.before)} → ${fmtTok(r.after)} chars of carried context`);
-  } catch (err) { say(err.message, true); }
-  refreshSummary();
-}
 // Backspace or Delete removes the selected agent, unless the user is typing or a dialog is open
 document.addEventListener("keydown", e => {
   const t = e.target;
@@ -797,7 +788,6 @@ $("#a-parent").onchange = e => {
 
 function showGoalState(g) {
   const mgr = parentOf(selected), team = kidsOf(selected);
-  $("#i-run").title = !mgr ? "Run the goals in its list" : "Run from its goal";
   const canContinue = team.length > 0 && ["blocked", "failed"].includes(g.status);
   $("#i-continue").hidden = !canContinue;
   $("#i-run").classList.toggle("primary", !canContinue); // one primary action at a time
@@ -831,12 +821,15 @@ function renderWorking(st) {
     ? "It's reading the repo and writing the plan. The plan shows up here for your approval; nothing runs until you approve it." : "";
 }
 
-// showStop enables Stop only while the selected agent is working or waiting on its plan.
+// showStop enables Stop only while the selected agent is working or waiting on its plan, and
+// Run, Continue and Compact only while it isn't.
 function showStop() {
   const s = selected && summary.agents[selected]?.status;
   const on = BUSY.includes(s) || s === "awaiting";
   $("#i-stop").disabled = !on;
   $("#i-stop").title = on ? "Stop it (and its team)" : "Nothing to stop: it isn't running";
+  $("#i-run").disabled = $("#i-continue").disabled = $("#i-compact").disabled = on;
+  $("#i-run").title = on ? `${nameOf(selected)} is running. Stop it first, or wait for it to finish.` : !parentOf(selected) ? "Run the goals in its list" : "Run from its goal";
 }
 
 function renderStats() {
@@ -932,7 +925,7 @@ $("#i-run").onclick = async e => {
     refreshSummary();
     showTab("logs");
   } catch (err) { runMsg(err.message, true); }
-  btn.disabled = false;
+  showStop();
 };
 // Request changes: re-run an agent that already worked with what the user wants different.
 // Request changes: after a run, send the agent back to change what isn't right, keeping its work.
@@ -1016,6 +1009,18 @@ $("#i-clone").onclick = async () => {
     refreshCards();
     select(a.id);
   } catch (e) { say(e.message, true); }
+};
+// Compact context shrinks the notes on changes the user removed, the one thing every prompt of the
+// agent carries from run to run, to each file's added and removed lines.
+$("#i-compact").onclick = async () => {
+  $("#i-more").open = false;
+  const id = selected;
+  try {
+    const r = await api("POST", `/api/agents/${encodeURIComponent(id)}/compact`);
+    runMsg(!r.before ? `Nothing to compact: ${nameOf(id)}'s prompts carry no notes from earlier runs. Each run starts a fresh session.`
+      : r.after < r.before ? `Compacted ${nameOf(id)}'s notes on removed changes from ${fmtTok(r.before)} to ${fmtTok(r.after)} characters.`
+      : `${nameOf(id)}'s notes on removed changes are already compact (${fmtTok(r.after)} characters).`);
+  } catch (err) { runMsg(err.message, true); }
 };
 $("#i-stop").onclick = () => api("POST", `/api/agents/${selected}/stop`).then(() => runMsg("Stopping…")).catch(e => runMsg(e.message, true));
 
@@ -1107,7 +1112,7 @@ function renderPlan() {
       items.set(k.id, { on: !!x, f: x ? { ...structuredClone(x), checks: x.checks || [] }
         : d.kind === "revision" ? { agent: k.id, change: "", checks: [] } : { agent: k.id, title: "", body: "", criteria: "", checks: [] } });
     }
-    planEdit = { draft: d.id, kind: d.kind, mgr: selected, items, open: planItems(d)[0]?.agent };
+    planEdit = { draft: d.id, kind: d.kind, mgr: selected, items, open: null }; // every report starts folded
     $("#pr-feedback").value = "";
     status($("#pr-msg"), "");
   }
@@ -1118,7 +1123,15 @@ const WEAK_CHECK = /^(true|:|exit 0|pwd|ls(\s.*)?|echo(\s.*)?)$/;
 function checkWarnings(kind, checks) {
   const ws = checks.filter(c => WEAK_CHECK.test(c)).map(c => `\`${c}\` can't fail, so it proves nothing.`);
   if (kind === "plan" && !checks.length) ws.unshift("No checks: nothing can prove this is done.");
+  else if (kind === "plan" && onlyGeneric(checks)) ws.push(GENERIC_WARNING);
   return ws;
+}
+// onlyGeneric says whether every check is one that already passes before any work, like the whole test
+// suite or a build: they prove nothing broke, not that the goal was met.
+const GENERIC_WARNING = "These checks already pass before any work is done. Add one that fails until this goal is met, e.g. a test named for it.";
+function onlyGeneric(checks) {
+  const generic = new Set((setupData?.checks || []).filter(c => !c.specific).map(c => c.cmd));
+  return checks.length > 0 && checks.every(c => generic.has(c));
 }
 const checkLines = v => v.split("\n").map(l => l.trim()).filter(Boolean);
 
@@ -1218,6 +1231,32 @@ $("#pr-cancel").onclick = async e => {
   const btn = e.currentTarget;
   if (!await ask(`Cancel ${nameOf(planEdit.mgr)}'s plan?`, "The run stops and no report's goal changes.", "Cancel plan", "Keep it")) return;
   decidePlan(btn, { action: "cancel" }, "Cancelling…", `${nameOf(planEdit.mgr)}'s plan was cancelled.`);
+};
+
+/* ---------- expand: edit a goal's details or criteria in a larger window ---------- */
+
+let expanding = null;
+document.addEventListener("click", e => {
+  const b = e.target.closest("button.expand");
+  if (!b) return;
+  e.preventDefault();
+  expanding = document.getElementById(b.dataset.for);
+  $("#expand-dialog h3").textContent = b.parentElement.firstChild.textContent.trim();
+  $("#x-text").value = expanding.value;
+  $("#x-text").placeholder = expanding.placeholder;
+  $("#expand-dialog").showModal();
+  $("#x-text").focus();
+});
+$("#x-text").onkeydown = e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#expand-dialog").close("ok"); } };
+$("#expand-form").onsubmit = e => { e.preventDefault(); $("#expand-dialog").close(e.submitter?.value || "ok"); };
+$("#expand-dialog").onclose = () => {
+  if ($("#expand-dialog").returnValue === "ok" && expanding) {
+    expanding.value = $("#x-text").value;
+    expanding.dispatchEvent(new Event("input", { bubbles: true }));
+    expanding.focus();
+  }
+  $("#expand-dialog").returnValue = "";
+  expanding = null;
 };
 
 /* ---------- queue: goals a top-level agent runs one after another ---------- */
@@ -1570,15 +1609,23 @@ function showSuggestions(box, textarea) {
   if (!cs.length) { box.replaceChildren(); return; }
   const have = new Set(lines(textarea.value));
   const todo = cs.filter(c => !have.has(c.cmd));
-  if (!todo.length) { box.replaceChildren(); return; }
-  box.replaceChildren("Suggested:", ...todo.map(c => {
+  const weak = onlyGeneric(lines(textarea.value)) ? [el("span", "weak", "⚠ " + GENERIC_WARNING)] : [];
+  if (!todo.length) { box.replaceChildren(...weak); return; }
+  // the ones that prove this goal's work come first; the rest only prove nothing broke
+  box.replaceChildren(...weak, "Suggested:", ...todo.map(c => {
     const b = el("button", "", c.cmd);
     b.type = "button";
     b.title = `Add this check: ${c.why}`;
     b.onclick = () => {
-      textarea.value = (textarea.value.trim() ? textarea.value.trimEnd() + "\n" : "") + c.cmd;
+      const before = textarea.value.trim() ? textarea.value.trimEnd() + "\n" : "";
+      textarea.value = before + c.cmd;
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
       showSuggestions(box, textarea);
+      if (c.edit) { // select the part to replace, e.g. the name of the test that proves this goal
+        const at = before.length + c.cmd.indexOf(c.edit);
+        textarea.focus();
+        textarea.setSelectionRange(at, at + c.edit.length);
+      }
     };
     return b;
   }));
@@ -2141,9 +2188,21 @@ async function loadPreview() {
   const something = (p.commits && p.files) || p.uncommitted > 0;
   lines.push(el("span", "", p.commits && p.files
     ? `${p.commits} commit${p.commits > 1 ? "s" : ""} · ${p.files} file${p.files !== 1 ? "s" : ""} · +${p.adds} −${p.dels}`
-    : something ? "No checkpoints to merge yet." : `Nothing to merge: ${p.target} already has all of this work.`));
+    : something ? "No checkpoints to merge yet." : `Nothing to merge: ${p.exists ? p.target : p.start} already has all of this work.`));
   if (p.uncommitted) lines.push(el("p", "note", `Plus ${p.uncommitted} file${p.uncommitted > 1 ? "s" : ""} changed since the last checkpoint, not counted above. Merging saves ${p.uncommitted > 1 ? "them" : "it"} as a checkpoint first.`));
-  if (!p.exists) lines.push(el("span", "", `Creates branch ${p.target} from ${p.start}.`));
+  $("#m-branches").replaceChildren(...(p.branches || []).map(b => new Option(b)));
+  if (!p.exists) { // a typo would otherwise quietly put the work on a new branch nobody is looking at
+    const note = el("p", "note new");
+    note.append(el("b", "", `${p.target} doesn't exist.`), ` Merging creates it from ${p.start}.`);
+    if (p.similar) {
+      const b = el("button", "", p.similar);
+      b.type = "button";
+      b.onclick = () => { mform.elements.target.value = p.similar; loadPreview(); };
+      note.append(" Did you mean ", b, "?");
+    }
+    lines.push(note);
+  }
+  $("#m-go").textContent = p.exists ? "Merge" : `Create ${p.target} and merge`;
   if (p.checkedOut) lines.push(el("p", p.dirty ? "note bad" : "note", p.dirty
     ? `${p.target} is checked out in ${p.checkedOut} with uncommitted changes. Commit or stash them first.`
     : `${p.target} is checked out in ${p.checkedOut}; the files there will update.`));
@@ -2178,7 +2237,7 @@ mform.onsubmit = async e => {
   try {
     const r = await api("POST", `/api/agents/${selected}/merge`, {
       target: mform.elements.target.value.trim(), strategy: mform.elements.strategy.value, message: mform.elements.message.value });
-    status($("#m-msg"), `Merged into ${r.target} as ${r.sha}.`);
+    status($("#m-msg"), r.created ? `Created branch ${r.target} and merged into it as ${r.sha}.` : `Merged into ${r.target} as ${r.sha}.`);
     say(`merged ${nameOf(selected)} into ${r.target}`);
   } catch (err) { status($("#m-msg"), err.message, true); }
   loadPreview();
@@ -2194,7 +2253,6 @@ function refreshCards() {
     card.dataset.status = st?.status ?? "idle";
     const busy = BUSY.includes(card.dataset.status);
     card.classList.toggle("busy", busy);
-    card.querySelectorAll(".acts button").forEach(b => b.disabled = busy);
     card.querySelector(".now").textContent = st?.now || (st?.title ? "goal: " + st.title : "no goal yet");
     const draft = plans.get(parentOf(a.id)), item = draft && planItems(draft).find(x => x.agent === a.id);
     card.classList.toggle("proposed", !!item);
