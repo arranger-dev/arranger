@@ -108,11 +108,8 @@ function linkFlow(mgrStatus, kidStatus) {
 
 // drawLinks draws a dotted curve from each manager down to each report, animated while they work together.
 function drawLinks() {
-  let w = 0, h = 0;
   const paths = [];
   for (const a of agents.values()) {
-    w = Math.max(w, a.x + a.el.offsetWidth);
-    h = Math.max(h, a.y + a.el.offsetHeight);
     const p = agents.get(parentOf(a.id));
     if (!p) continue;
     const x1 = p.x + p.el.offsetWidth / 2, y1 = p.y + p.el.offsetHeight, x2 = a.x + a.el.offsetWidth / 2, y2 = a.y;
@@ -140,12 +137,13 @@ function drawLinks() {
     paths.push(g);
   }
   linksSvg.replaceChildren(...paths);
-  // room to spread out: the canvas always reaches well past the last box and the viewport
-  const cw = Math.max(w + 1200, main.clientWidth * 2), ch = Math.max(h + 900, main.clientHeight * 2);
-  canvas.style.width = cw + "px";
-  canvas.style.height = ch + "px";
-  linksSvg.setAttribute("width", cw);
-  linksSvg.setAttribute("height", ch);
+}
+
+// the canvas is unbounded; panX/panY shift it inside main
+let panX = 0, panY = 0;
+function pan(x, y) {
+  panX = x; panY = y;
+  canvas.style.transform = `translate(${x}px, ${y}px)`;
 }
 
 function markDirty() { dirty = true; say("unsaved changes"); }
@@ -157,7 +155,7 @@ function addAgent(role, name, type, x, y, parent) {
   const a = {
     id: slug(role) + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     name, role, runtime: type?.runtime ?? "claude", parent: parent ?? "", color: "",
-    x: Math.max(0, Math.round(x / SNAP) * SNAP), y: Math.max(0, Math.round(y / SNAP) * SNAP),
+    x: Math.round(x / SNAP) * SNAP, y: Math.round(y / SNAP) * SNAP,
     defaults: type ? { model: type.model, args: type.args, prompt: type.prompt }
       : window.ROLES?.[role] ? { prompt: window.ROLES[role] } : null, // a default type starts with its role's instructions
   };
@@ -261,7 +259,7 @@ function linkFrom(e, c) {
 // boxes on the canvas: drag to move; release over another box to report to it; click to open
 canvas.addEventListener("pointerdown", e => {
   const c = e.target.closest(".card");
-  if (!c || e.button !== 0 || e.target.classList.contains("x")) return;
+  if (!c || e.button !== 0 || e.target.classList.contains("x") || e.target.closest("button")) return;
   if (e.target.classList.contains("port")) { e.preventDefault(); linkFrom(e, c); return; }
   const a = agents.get(c.dataset.id), sx = e.clientX, sy = e.clientY, ox = a.x, oy = a.y;
   let moved = false, over = null;
@@ -271,8 +269,8 @@ canvas.addEventListener("pointerdown", e => {
     if (!moved && Math.hypot(dx, dy) < 4) return;
     moved = true;
     c.classList.add("dragging");
-    a.x = Math.max(0, Math.round((ox + dx) / SNAP) * SNAP);
-    a.y = Math.max(0, Math.round((oy + dy) / SNAP) * SNAP);
+    a.x = Math.round((ox + dx) / SNAP) * SNAP;
+    a.y = Math.round((oy + dy) / SNAP) * SNAP;
     c.style.left = a.x + "px";
     c.style.top = a.y + "px";
     over?.classList.remove("drop");
@@ -312,8 +310,8 @@ function setPicked(ids) {
   if (picked.size > 1) say(`${picked.size} agents selected · Backspace removes them, Esc clears`);
 }
 
-// empty space: drag to select the boxes in a rectangle, like draw.io; hold Space (or use the
-// middle button) and drag to move around, or just scroll
+// empty space: drag (or Space-drag, or middle-drag) to pan the canvas, or scroll to pan;
+// Shift-drag selects the boxes in a rectangle, like draw.io; a click clears the selection
 let spaceDown = false;
 document.addEventListener("keydown", e => {
   if (e.code !== "Space" || e.repeat || e.target.closest?.("input, textarea, select, button, [contenteditable], dialog")) return;
@@ -325,14 +323,20 @@ document.addEventListener("keyup", e => { if (e.code === "Space") { spaceDown = 
 main.addEventListener("pointerdown", e => {
   if (e.button !== 0 && e.button !== 1 || e.target.closest("button, #links .link, #empty-canvas") || e.target.closest(".card") && !spaceDown) return;
   try { main.setPointerCapture(e.pointerId); } catch {}
-  if (spaceDown || e.button === 1) {
+  if (spaceDown || e.button === 1 || !e.shiftKey) {
     e.preventDefault();
-    const sx = e.clientX + main.scrollLeft, sy = e.clientY + main.scrollTop;
+    const sx = e.clientX - panX, sy = e.clientY - panY;
+    let moved = false;
     main.classList.add("panning");
-    main.onpointermove = m => { main.scrollLeft = sx - m.clientX; main.scrollTop = sy - m.clientY; };
+    main.onpointermove = m => {
+      if (!moved && Math.hypot(m.clientX - e.clientX, m.clientY - e.clientY) < 4) return;
+      moved = true;
+      pan(m.clientX - sx, m.clientY - sy);
+    };
     main.onpointerup = main.onpointercancel = () => {
       main.onpointermove = main.onpointerup = main.onpointercancel = null;
       main.classList.remove("panning");
+      if (!moved && !spaceDown && e.button === 0) setPicked([]); // a click on empty space clears the selection
     };
     return;
   }
@@ -340,7 +344,7 @@ main.addEventListener("pointerdown", e => {
   const box = el("div");
   box.id = "marquee";
   let moved = false;
-  const before = e.shiftKey ? new Set(picked) : new Set(); // shift adds to what's selected
+  const before = new Set(picked); // shift-drag adds to what's selected
   main.onpointermove = m => {
     const r = canvas.getBoundingClientRect(), x1 = m.clientX - r.left, y1 = m.clientY - r.top;
     if (!moved && Math.hypot(x1 - x0, y1 - y0) < 4) return;
@@ -353,9 +357,13 @@ main.addEventListener("pointerdown", e => {
   main.onpointerup = main.onpointercancel = () => {
     main.onpointermove = main.onpointerup = main.onpointercancel = null;
     box.remove();
-    if (!moved && !e.shiftKey) setPicked([]); // a click on empty space clears the selection
   };
 });
+main.addEventListener("wheel", e => {
+  if (e.ctrlKey) return; // pinch / ctrl-wheel stays the browser's zoom
+  e.preventDefault();
+  pan(panX - e.deltaX, panY - e.deltaY);
+}, { passive: false });
 // ask shows the styled confirm dialog and resolves true when the user presses the action button,
 // which is red unless danger is false.
 function ask(title, text, action, keep = "Cancel", danger = true) {
@@ -413,7 +421,19 @@ async function removeAgents(ids) {
 }
 canvas.addEventListener("click", e => {
   if (e.target.classList.contains("x")) removeAgent(e.target.closest(".card").dataset.id);
+  if (e.target.matches(".acts button")) compactAgent(e);
 });
+// compactAgent shrinks (or with the clear button, drops) the feedback and notes carried into the agent's next prompt.
+async function compactAgent(e) {
+  e.stopPropagation();
+  const id = e.target.closest(".card").dataset.id, clear = e.target.classList.contains("clear");
+  if (clear && !confirm(`Clear the feedback and notes carried into ${nameOf(id)}'s next prompt?`)) return;
+  try {
+    const r = await api("POST", `/api/agents/${id}/compact`, clear ? { clear: true } : undefined);
+    say(`${clear ? "cleared" : "compacted"} ${nameOf(id)}: ${fmtTok(r.before)} → ${fmtTok(r.after)} chars of carried context`);
+  } catch (err) { say(err.message, true); }
+  refreshSummary();
+}
 // Backspace or Delete removes the selected agent, unless the user is typing or a dialog is open
 document.addEventListener("keydown", e => {
   const t = e.target;
@@ -444,7 +464,7 @@ async function askText(title, value, action) {
 canvas.addEventListener("dblclick", async e => {
   const c = e.target.closest(".card");
   const a = c && agents.get(c.dataset.id);
-  if (!a) return;
+  if (!a || e.target.closest("button")) return;
   const v = await askText("Rename agent", a.name, "Rename");
   if (v && v !== a.name) { a.name = v; paintCard(a); markDirty(); }
 });
@@ -452,7 +472,7 @@ $("#tidy").onclick = () => {
   layout(true);
   agents.forEach(paintCard);
   drawLinks();
-  main.scrollTo({ left: 0, top: 0, behavior: "smooth" }); // the tidy tree starts at the top left; don't leave the view on empty canvas
+  pan(0, 0); // the tidy tree starts at the top left; don't leave the view on empty canvas
   markDirty();
 };
 
@@ -533,8 +553,8 @@ $$("#project ul a").forEach(link => link.onclick = async e => {
   }
 });
 // open menus close on a click elsewhere or Escape
-document.addEventListener("click", e => $$("details.menu[open], #needs[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }));
-document.addEventListener("keydown", e => { if (e.key === "Escape") $$("details.menu[open], #needs[open]").forEach(d => { d.open = false; d.querySelector("summary").focus(); }); });
+document.addEventListener("click", e => $$("details.menu[open], #needs[open], #i-more[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }));
+document.addEventListener("keydown", e => { if (e.key === "Escape") $$("details.menu[open], #needs[open], #i-more[open]").forEach(d => { d.open = false; d.querySelector("summary").focus(); }); });
 
 const dlg = $("#project-dialog"), pform = $("#project-form");
 let editing = null; // null = creating
@@ -981,6 +1001,7 @@ async function continueRun() {
 $("#i-continue").onclick = continueRun;
 
 $("#i-clone").onclick = async () => {
+  $("#i-more").open = false;
   if (!await ask(`Add a copy of ${nameOf(selected)}?`, "It gets the same settings and manager, but no goal." + (dirty ? " Unsaved changes on the canvas are saved too." : ""),
     "Add copy", "Cancel", false)) return;
   try {
@@ -1070,12 +1091,15 @@ function syncPlans() {
 }
 
 // planEdit is the plan as the user is editing it: report id -> {on, f}, for one draft.
-let planEdit = null;
+// planDismissed is the draft the user closed the dialog on, so polls don't reopen it.
+let planEdit = null, planDismissed = null;
+const pdlg = $("#plan-dialog");
 
 function renderPlan() {
   const d = selected && plans.get(selected);
-  $("#plan-review").hidden = !d;
-  if (!d) { planEdit = null; return; }
+  if (!d) { planEdit = null; if (pdlg.open) pdlg.close(); $("#plan-open").hidden = true; return; }
+  if (!pdlg.open && planDismissed !== d.id) pdlg.showModal();
+  $("#plan-open").hidden = pdlg.open;
   if (planEdit?.draft !== d.id) {
     const items = new Map();
     for (const k of kidsOf(selected)) {
@@ -1176,6 +1200,12 @@ async function decidePlan(btn, body, working, done) {
   btn.disabled = false;
 }
 
+pdlg.onclose = () => {
+  if (planEdit) planDismissed = planEdit.draft; // closed with Esc or Close while still pending
+  $("#plan-open").hidden = !planEdit;
+};
+$("#plan-close").onclick = () => pdlg.close();
+$("#plan-open").onclick = () => { pdlg.showModal(); $("#plan-open").hidden = true; };
 $("#pr-approve").onclick = e => {
   const on = [...planEdit.items.values()].filter(i => i.on).map(i => i.f);
   const body = planEdit.kind === "revision" ? { action: "approve", changes: on } : { action: "approve", subgoals: on };
@@ -1488,7 +1518,7 @@ async function addTemplate(t) {
     await save();
     $("#setup-dialog").close();
     say(`Added the ${t.name} team`);
-    main.scrollTo({ left: Math.max(0, x0 - PAD), top: 0, behavior: "smooth" });
+    pan(PAD - x0, 0);
   } catch (err) { status($("#su-msg"), err.message, true); }
 }
 
@@ -2129,6 +2159,7 @@ async function loadPreview() {
 }
 
 $("#i-merge").onclick = async () => {
+  $("#i-more").open = false;
   $("#m-agent").textContent = nameOf(selected);
   mform.elements.target.value = "";
   mform.elements.message.value = "";
@@ -2163,6 +2194,7 @@ function refreshCards() {
     card.dataset.status = st?.status ?? "idle";
     const busy = BUSY.includes(card.dataset.status);
     card.classList.toggle("busy", busy);
+    card.querySelectorAll(".acts button").forEach(b => b.disabled = busy);
     card.querySelector(".now").textContent = st?.now || (st?.title ? "goal: " + st.title : "no goal yet");
     const draft = plans.get(parentOf(a.id)), item = draft && planItems(draft).find(x => x.agent === a.id);
     card.classList.toggle("proposed", !!item);

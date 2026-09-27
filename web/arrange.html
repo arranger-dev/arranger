@@ -107,7 +107,7 @@ aside#palette > .grow { flex: 1 0 20px; } /* pushes the version to the bottom, k
 .about { font: 11px/1.6 var(--mono); color: var(--muted); margin: 0; padding-top: 10px; border-top: 1px solid var(--line); }
 .about b { color: var(--text); font-weight: 600; }
 .about a { color: inherit; }
-main { overflow: auto; position: relative; }
+main { overflow: hidden; position: relative; }
 main.drop { background: var(--drop); }
 main { cursor: grab; } main.panning { cursor: grabbing; user-select: none; }
 /* free-form canvas: boxes sit where you drop them; links are drawn between them */
@@ -152,6 +152,8 @@ main.can-pan, main.can-pan .card { cursor: grab; }
 .card .now { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 14px; }
 .card .badges { display: flex; gap: 8px; }
 .card .badges:empty { display: none; }
+.card .acts { grid-column: 1 / -1; display: flex; gap: 4px; }
+.card .acts button { font: 10px var(--mono); padding: 0 5px; }
 .card .badges .warn { color: var(--verifying); font-weight: 600; } .card .badges .over { color: var(--failed); font-weight: 600; }
 /* working agents: an outline in their status color plus a sweeping bar, so activity is visible at a glance */
 .card.busy { border-color: var(--s); border-left-color: var(--c); box-shadow: 0 0 0 3px color-mix(in srgb, var(--s) 22%, transparent); }
@@ -198,6 +200,13 @@ body.resizing { cursor: col-resize; user-select: none; }
 #inspector[hidden] { display: none; }
 .ihead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .ihead .name { font-weight: 600; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.more { position: relative; }
+.more > summary { list-style: none; cursor: pointer; user-select: none; padding: 5px 8px; border: 1px solid var(--line); background: var(--panel); letter-spacing: 1px; }
+.more > summary::-webkit-details-marker { display: none; }
+.more > .menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; display: flex; flex-direction: column; gap: 4px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); box-shadow: 0 8px 24px #0003; }
+.more > .menu button { text-align: left; white-space: nowrap; }
+#i-more:not(:has(> .menu > button:not([hidden]))) { display: none; }
 #i-dir { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px var(--mono); color: var(--muted); cursor: copy; }
 .tabs { display: flex; border-bottom: 1px solid var(--line); }
 .tabs button { border: 0; border-bottom: 2px solid transparent; background: none; padding: 8px 14px; color: var(--muted); }
@@ -378,8 +387,10 @@ label.check input[type=radio] { appearance: auto; -webkit-appearance: radio; wid
 #g-working-note { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
 #g-working-note:empty { display: none; }
 #g-working .st::before { width: 9px; height: 9px; margin-right: 8px; border-radius: 50%; }
-#plan-review { margin-top: 14px; padding: 4px 12px 12px; background: var(--sunk); border: 1px solid var(--line); border-left: 3px solid var(--awaiting); }
-#plan-review h3 { margin: 8px 0 2px; font-size: 14px; }
+#plan-dialog { width: min(900px, 94vw); max-height: 85vh; overflow: auto; border-top: 3px solid var(--awaiting); }
+#plan-open { margin-top: 14px; }
+#plan-open[hidden] { display: none; }
+#plan-review .pr-item .fields textarea { min-height: 72px; resize: vertical; }
 #plan-review .pr-item { background: var(--panel); border: 1px solid var(--line); margin-top: 8px; }
 #plan-review .pr-item > summary { display: flex; gap: 8px; align-items: center; padding: 6px 10px; cursor: pointer; }
 #plan-review .pr-item > summary .who { font-weight: 600; white-space: nowrap; }
@@ -416,6 +427,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <span class="meta"><span class="st"></span><span class="role"></span> · <span class="rt"></span></span>
     <span class="now"></span>
     <span class="badges"></span>
+    <span class="acts"><button class="compact" title="Shrink the feedback and notes carried into this agent's next prompt, to cut token cost">compact</button><button class="clear" title="Clear the feedback and notes carried into this agent's next prompt, to cut token cost">clear</button></span>
     <span class="port down" title="Drag onto another agent to make it report to this one"></span>
     <span class="port left" title="Drag onto another agent to connect them; the higher box manages"></span>
     <span class="port right" title="Drag onto another agent to connect them; the higher box manages"></span>
@@ -487,8 +499,10 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     <span class="st" id="i-status" data-status="idle"></span>
     <span class="name" id="i-name"></span>
     <span id="i-dir"></span>
-    <button id="i-clone" title="Add a copy of this agent (same settings and manager, no goal)">Clone</button>
-    <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
+    <details id="i-more" class="more"><summary title="More options">...</summary><div class="menu">
+      <button id="i-clone" title="Add a copy of this agent (same settings and manager, no goal)">Clone</button>
+      <button id="i-merge" title="Merge this agent's work into a branch of your repo">Merge…</button>
+    </div></details>
     <button id="i-continue" class="primary" hidden title="Pick the run up where it stopped: finished reports keep their work, the others run again, then everything is reviewed and merged">Continue</button>
     <button id="i-run" class="primary">Run</button>
     <button id="i-stop" class="danger">Stop</button>
@@ -501,20 +515,7 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
   </div>
   <form class="pane" data-pane="goal" id="goal-form">
     <div id="g-working" hidden><span class="st busy" id="g-working-dot"></span><span><span id="g-working-text"></span><span id="g-working-note"></span></span></div>
-    <div id="plan-review" hidden>
-      <h3 id="pr-title"></h3>
-      <p class="hint" id="pr-sub" style="margin-top:0"></p>
-      <div id="pr-items"></div>
-      <label for="pr-feedback">Feedback on the plan (optional)</label>
-      <textarea id="pr-feedback" rows="2" placeholder="What should the new plan do differently? e.g. Give the database work to DB Coder."></textarea>
-      <div class="row">
-        <button type="button" class="primary" id="pr-approve">Approve and run</button>
-        <button type="button" id="pr-replan">Plan again with feedback</button>
-        <span class="sp" style="flex:1"></span>
-        <button type="button" class="danger" id="pr-cancel">Cancel</button>
-      </div>
-      <p class="status" id="pr-msg" role="status"></p>
-    </div>
+    <button type="button" id="plan-open" class="primary" hidden>Review the plan</button>
     <section id="queue" hidden>
       <div class="qhead"><h4>Goals</h4><span class="hint" id="q-state"></span></div>
       <p class="hint" id="q-hint">Add the goals you want done. Run works through them one after another, each on the code the one before it left, with its own plan, checks and log.</p>
@@ -679,6 +680,23 @@ dialog h3 { margin: 0 0 4px; font-size: 15px; }
     </div>
     <div class="row"><button class="primary" value="run" id="run-go"></button><button value="cancel" formnovalidate>Cancel</button></div>
   </form>
+</dialog>
+
+<dialog id="plan-dialog">
+  <div id="plan-review">
+    <div class="row" style="margin:0"><h3 id="pr-title" style="flex:1"></h3><button type="button" id="plan-close">Close</button></div>
+    <p class="hint" id="pr-sub" style="margin-top:0"></p>
+    <div id="pr-items"></div>
+    <label for="pr-feedback">Feedback on the plan (optional)</label>
+    <textarea id="pr-feedback" rows="2" placeholder="What should the new plan do differently? e.g. Give the database work to DB Coder."></textarea>
+    <div class="row">
+      <button type="button" class="primary" id="pr-approve">Approve and run</button>
+      <button type="button" id="pr-replan">Plan again with feedback</button>
+      <span class="sp" style="flex:1"></span>
+      <button type="button" class="danger" id="pr-cancel">Cancel</button>
+    </div>
+    <p class="status" id="pr-msg" role="status"></p>
+  </div>
 </dialog>
 
 <dialog id="stats-dialog">

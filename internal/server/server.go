@@ -65,6 +65,7 @@ func New(st *store.Store, o *orch.Orchestrator, loopback bool) http.Handler {
 	mux.HandleFunc("GET /api/agents/{id}/plan", s.getPlan)
 	mux.HandleFunc("POST /api/agents/{id}/plan", s.decidePlan)
 	mux.HandleFunc("POST /api/agents/{id}/stop", s.stop)
+	mux.HandleFunc("POST /api/agents/{id}/compact", s.compact)
 	mux.HandleFunc("GET /api/agents/{id}/events", s.events)
 	mux.HandleFunc("GET /api/agents/{id}/runs", s.runs)
 	mux.HandleFunc("GET /api/agents/{id}/diff", s.diff)
